@@ -1710,6 +1710,95 @@ func getInitScript(ua string) string {
 			initViewerObserver();
 		})();
 
+		// "Saved to disk" badges on the Media/Docs panel. WhatsApp has no notion
+		// of local downloads, so bridge it: for each document/media item shown in
+		// the all-chats panel, check whether the same filename exists in the
+		// configured downloads folder and tag it with a small green check.
+		(function() {
+			var savedScanQueued = false;
+			var savedCache = {};
+			var badgeStyle = 'display:inline-flex;align-items:center;gap:2px;margin-left:6px;padding:0 6px;border-radius:8px;' +
+				'font-size:10px;font-weight:600;line-height:14px;vertical-align:middle;background:rgba(6,174,116,.16);color:#06ae74;';
+
+			function ensureDownloadDir() {
+				return window.getDownloadDirNative ? window.getDownloadDirNative() : Promise.resolve('');
+			}
+
+			function fileExistsOnDisk(name) {
+				if (!name || !window.checkFileExistsNative) return Promise.resolve(false);
+				if (name in savedCache) return Promise.resolve(savedCache[name]);
+				return window.checkFileExistsNative(name).then(function(exists) {
+					savedCache[name] = !!exists;
+					return !!exists;
+				}).catch(function() { return false; });
+			}
+
+			function decorateItem(el, name) {
+				if (el.__waSavedBadge) return;
+				fileExistsOnDisk(name).then(function(exists) {
+					if (!exists) return;
+					el.__waSavedBadge = true;
+					var badge = document.createElement('span');
+					badge.className = 'wa-saved-badge';
+					badge.setAttribute('aria-label', 'Already saved to downloads folder');
+					badge.style.cssText = badgeStyle;
+					badge.textContent = '✓ Saved';
+					// Prefer overlaying media thumbnails; append for text rows.
+					var host = el.querySelector('[data-testid="cell-frame-container"], .copyable-text') || el;
+					host.style.position = host.style.position || 'relative';
+					host.appendChild(badge);
+				});
+			}
+
+			function itemFileName(el) {
+				var t = el.getAttribute && (el.getAttribute('title') || '');
+				if (!t) {
+					var titleEl = el.querySelector && el.querySelector('span[title], div[title]');
+					t = titleEl ? (titleEl.getAttribute('title') || '') : '';
+				}
+				if (!t) return '';
+				var m = t.match(/([^\n\r<>]{1,180}\.(pdf|docx?|xlsx?|pptx?|txt|csv|rtf|zip|mp4|mkv|mov|mp3|wav|jpe?g|png|webp|heic))\b/i);
+				return m ? m[1].trim() : '';
+			}
+
+			function scanPanel() {
+				// The all-chats media panel and per-chat media/doc lists share row
+				// test ids; document rows expose a filename in their title spans.
+				var rows = document.querySelectorAll('[data-testid="media-viewer"], [role="row"], [data-testid="cell-frame-outer"]');
+				for (var i = 0; i < rows.length; i++) {
+					var row = rows[i];
+					if (row.__waSavedBadge) continue;
+					var name = itemFileName(row);
+					if (name) decorateItem(row, name);
+				}
+			}
+
+			function scheduleScan() {
+				if (savedScanQueued || shouldPauseBackgroundWork()) return;
+				savedScanQueued = true;
+				requestAnimationFrame(function() {
+					savedScanQueued = false;
+					scanPanel();
+				});
+			}
+
+			ensureDownloadDir();
+			// Observe panel/dialog appearances instead of polling.
+			var panelObserver = new MutationObserver(scheduleScan);
+			function watchRoot() {
+				var root = document.body;
+				if (root) panelObserver.observe(root, { childList: true, subtree: true });
+			}
+			watchRoot();
+			document.addEventListener('DOMContentLoaded', watchRoot, { once: true });
+			document.addEventListener('click', function(e) {
+				// Rescan when the user opens the media/docs panel from the toolbar.
+				if (e.target && e.target.closest && e.target.closest('[data-testid="chat-menu"], [data-icon="default-image"], [data-icon="docs"], [data-icon="image"]')) {
+					setTimeout(scheduleScan, 300);
+				}
+			}, true);
+		})();
+
 		// Theme Manager, In-Flow Header Toolbar Button & Control Center Modal
 		(function() {
 			var isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
