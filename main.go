@@ -1066,29 +1066,31 @@ func getInitScript(ua string) string {
 			var isPrivacyActive = false;
 			var styleEl = document.createElement('style');
 			styleEl.id = 'whatsapp-privacy-style';
-			// WhatsApp Web rotates its internal class names (#main, #pane-side,
-			// .copyable-text) often; match every layer we know of — current
-			// test ids, ARIA roles, and legacy names — so at least one path
-			// always hits regardless of the deploy in front of us.
+			// BLUR STRATEGY (perf-critical, see Fedora report): blurring hundreds
+			// of leaf elements forces WebKitGTK to allocate a compositing layer
+			// per element, and animating filter re-runs Gaussian blur per frame.
+			// That caused 1.8 GB RAM spikes, 100% CPU and renderer aborts on
+			// Wayland. So: blur only a handful of LARGE containers (main pane,
+			// chat list, viewer), never per-element, never animated. "Reveal on
+			// hover" is dropped on CSS-blurred containers — use the privacy
+			// toggle instead — because :hover on blurred layers re-triggers the
+			// expensive filter path on every mouse move.
 			styleEl.textContent = [
-				// Current DOM: main conversation, chat list, viewer
-				'.privacy-mode #main .copyable-text, .privacy-mode #main img, .privacy-mode #main video, .privacy-mode #pane-side span[title],',
-				'.privacy-mode [data-testid="conversation-panel"] .copyable-text, .privacy-mode [data-testid="conversation-panel"] img, .privacy-mode [data-testid="conversation-panel"] video,',
-				'.privacy-mode [data-testid="chat-list"] span[title], .privacy-mode [data-testid="cell-frame-container"] img, .privacy-mode [data-testid="cell-frame-container"] video,',
-				'.privacy-mode [data-testid="media-viewer"] img, .privacy-mode [data-testid="media-viewer"] video,',
-				// Role-based fallbacks (stable across restyles)
-				'.privacy-mode div[role="grid"] span[title], .privacy-mode div[role="row"] img, .privacy-mode div[role="row"] video, .privacy-mode div[role="row"] .copyable-text,',
-				// Legacy selectors kept for older deployments
-				'.privacy-mode .message-in img, .privacy-mode .message-out img, .privacy-mode .message-in video, .privacy-mode .message-out video',
-				'{ filter: blur(8px) !important; transition: filter 0.15s ease-in-out; }',
-				// Hover reveals (mirror every selector above without the blur rule)
-				'.privacy-mode #main .copyable-text:hover, .privacy-mode #main img:hover, .privacy-mode #main video:hover, .privacy-mode #pane-side span[title]:hover,',
-				'.privacy-mode [data-testid="conversation-panel"] .copyable-text:hover, .privacy-mode [data-testid="conversation-panel"] img:hover, .privacy-mode [data-testid="conversation-panel"] video:hover,',
-				'.privacy-mode [data-testid="chat-list"] span[title]:hover, .privacy-mode [data-testid="cell-frame-container"] img:hover, .privacy-mode [data-testid="cell-frame-container"] video:hover,',
-				'.privacy-mode [data-testid="media-viewer"] img:hover, .privacy-mode [data-testid="media-viewer"] video:hover,',
-				'.privacy-mode div[role="grid"] span[title]:hover, .privacy-mode div[role="row"] img:hover, .privacy-mode div[role="row"] video:hover, .privacy-mode div[role="row"] .copyable-text:hover,',
-				'.privacy-mode .message-in img:hover, .privacy-mode .message-out img:hover, .privacy-mode .message-in video:hover, .privacy-mode .message-out video:hover',
-				'{ filter: none !important; }'
+				// Layer 1: large containers only (a handful of layers total)
+				'.privacy-mode #main,',
+				'.privacy-mode [data-testid="conversation-panel"],',
+				'.privacy-mode [data-testid="chat-list"],',
+				'.privacy-mode #pane-side,',
+				'.privacy-mode [data-testid="media-viewer"]',
+				'{ filter: blur(12px) !important; }',
+				// Layer 2: fallback for deployments where the containers above
+				// don't exist — still bounded to visible message bubbles, not
+				// every img/video in the DOM.
+				'.privacy-mode .message-in, .privacy-mode .message-out',
+				'{ filter: blur(12px) !important; }',
+				// No transition on filter anywhere: the blur appears instantly
+				// and the compositor reuses one layer per container.
+				'.privacy-mode * { transition: none !important; }'
 			].join('\n');
 
 			window.togglePrivacyMode = function() {
@@ -2073,7 +2075,7 @@ func getInitScript(ua string) string {
 					'    <strong class="wa-text-primary" style="font-size:12.5px;">Privacy Mode</strong>' +
 					'    <span id="wa-badge-priv" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
 					'  </div>' +
-					'  <div class="wa-text-muted" style="font-size:11px;">Blur chats and media when cursor is idle.</div>' +
+					'  <div class="wa-text-muted" style="font-size:11px;">Blur chats and media until you turn this off.</div>' +
 					'</div>' +
 					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
