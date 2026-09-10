@@ -1403,20 +1403,24 @@ func getInitScript(ua string) string {
 				'  #pane-side, div[data-testid="chat-list"], #main { min-width: 0 !important; }' +
 				'}';
 
-			var respTimer = null;
+			// Once <head> exists the style never needs re-injection, so poll only
+			// via a cheap head observer instead of an endless 2.5s interval.
 			function injectResponsive() {
 				if (document.head && !document.getElementById('whatsapp-desktop-responsive')) {
 					document.head.appendChild(respStyle);
-					if (respTimer) {
-						clearInterval(respTimer);
-						respTimer = null;
-					}
+					observer.disconnect();
 				}
 			}
-			injectResponsive();
-			document.addEventListener('DOMContentLoaded', injectResponsive);
-			window.addEventListener('load', injectResponsive);
-			respTimer = setInterval(injectResponsive, 2500);
+			var observer = new MutationObserver(injectResponsive);
+			if (document.head) {
+				injectResponsive();
+			} else {
+				observer.observe(document.documentElement, { childList: true });
+			}
+			document.addEventListener('DOMContentLoaded', function() {
+				injectResponsive();
+				observer.disconnect();
+			}, { once: true });
 		})();
 
 		// Automatic Download & Document Preview Interceptor for Chat Files & Media
@@ -1893,7 +1897,26 @@ func getInitScript(ua string) string {
 			injectHeaderToolbarBtn();
 			document.addEventListener('DOMContentLoaded', injectHeaderToolbarBtn);
 			window.addEventListener('load', injectHeaderToolbarBtn);
-			setInterval(injectHeaderToolbarBtn, 2000);
+			// WhatsApp rebuilds its header when switching chats, dropping our
+			// button. Watch only #side/header region changes (rAF-coalesced)
+			// instead of scanning the whole page every 2 seconds forever.
+			var toolbarCheckQueued = false;
+			var toolbarObserver = new MutationObserver(function() {
+				if (toolbarCheckQueued || shouldPauseBackgroundWork()) return;
+				toolbarCheckQueued = true;
+				requestAnimationFrame(function() {
+					toolbarCheckQueued = false;
+					if (!document.getElementById('wa-toolbar-settings-btn')) {
+						injectHeaderToolbarBtn();
+					}
+				});
+			});
+			function watchToolbarRoot() {
+				var root = document.querySelector('#side') || document.body;
+				if (root) toolbarObserver.observe(root, { childList: true, subtree: true });
+			}
+			watchToolbarRoot();
+			document.addEventListener('DOMContentLoaded', watchToolbarRoot, { once: true });
 
 			// --- Minimalist WhatsApp Control Center Modal ---
 			window.showSettingsModal = function() {
