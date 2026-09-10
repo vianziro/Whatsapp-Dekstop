@@ -1066,7 +1066,30 @@ func getInitScript(ua string) string {
 			var isPrivacyActive = false;
 			var styleEl = document.createElement('style');
 			styleEl.id = 'whatsapp-privacy-style';
-			styleEl.textContent = '.privacy-mode #main .copyable-text, .privacy-mode #main img, .privacy-mode #main video, .privacy-mode #pane-side span[title] { filter: blur(8px) !important; transition: filter 0.15s ease-in-out; } .privacy-mode #main .copyable-text:hover, .privacy-mode #main img:hover, .privacy-mode #main video:hover, .privacy-mode #pane-side span[title]:hover { filter: none !important; }';
+			// WhatsApp Web rotates its internal class names (#main, #pane-side,
+			// .copyable-text) often; match every layer we know of — current
+			// test ids, ARIA roles, and legacy names — so at least one path
+			// always hits regardless of the deploy in front of us.
+			styleEl.textContent = [
+				// Current DOM: main conversation, chat list, viewer
+				'.privacy-mode #main .copyable-text, .privacy-mode #main img, .privacy-mode #main video, .privacy-mode #pane-side span[title],',
+				'.privacy-mode [data-testid="conversation-panel"] .copyable-text, .privacy-mode [data-testid="conversation-panel"] img, .privacy-mode [data-testid="conversation-panel"] video,',
+				'.privacy-mode [data-testid="chat-list"] span[title], .privacy-mode [data-testid="cell-frame-container"] img, .privacy-mode [data-testid="cell-frame-container"] video,',
+				'.privacy-mode [data-testid="media-viewer"] img, .privacy-mode [data-testid="media-viewer"] video,',
+				// Role-based fallbacks (stable across restyles)
+				'.privacy-mode div[role="grid"] span[title], .privacy-mode div[role="row"] img, .privacy-mode div[role="row"] video, .privacy-mode div[role="row"] .copyable-text,',
+				// Legacy selectors kept for older deployments
+				'.privacy-mode .message-in img, .privacy-mode .message-out img, .privacy-mode .message-in video, .privacy-mode .message-out video',
+				'{ filter: blur(8px) !important; transition: filter 0.15s ease-in-out; }',
+				// Hover reveals (mirror every selector above without the blur rule)
+				'.privacy-mode #main .copyable-text:hover, .privacy-mode #main img:hover, .privacy-mode #main video:hover, .privacy-mode #pane-side span[title]:hover,',
+				'.privacy-mode [data-testid="conversation-panel"] .copyable-text:hover, .privacy-mode [data-testid="conversation-panel"] img:hover, .privacy-mode [data-testid="conversation-panel"] video:hover,',
+				'.privacy-mode [data-testid="chat-list"] span[title]:hover, .privacy-mode [data-testid="cell-frame-container"] img:hover, .privacy-mode [data-testid="cell-frame-container"] video:hover,',
+				'.privacy-mode [data-testid="media-viewer"] img:hover, .privacy-mode [data-testid="media-viewer"] video:hover,',
+				'.privacy-mode div[role="grid"] span[title]:hover, .privacy-mode div[role="row"] img:hover, .privacy-mode div[role="row"] video:hover, .privacy-mode div[role="row"] .copyable-text:hover,',
+				'.privacy-mode .message-in img:hover, .privacy-mode .message-out img:hover, .privacy-mode .message-in video:hover, .privacy-mode .message-out video:hover',
+				'{ filter: none !important; }'
+			].join('\n');
 
 			window.togglePrivacyMode = function() {
 				isPrivacyActive = !isPrivacyActive;
@@ -1342,6 +1365,8 @@ func getInitScript(ua string) string {
 					return window.checkForUpdateNative(true).then(function(res) {
 						if (res && res.available) {
 							window.showUpdateBanner(res.latest_version, res.release_title, res.download_url);
+						} else if (res && res.check_error) {
+							showFloatingToast('⚠️ Update check failed: ' + res.check_error);
 						} else {
 							var cur = (res && res.current_version) ? res.current_version : '1.5.7';
 							showFloatingToast('✅ WhatsApp Desk is up to date (v' + cur + ')');
