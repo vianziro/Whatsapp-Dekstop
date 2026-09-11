@@ -1,6 +1,9 @@
 package main
 
-import "runtime"
+import (
+	"runtime"
+	"strings"
+)
 
 const (
 	windowWidth  = 1100
@@ -21,7 +24,7 @@ func getInitScript(ua string) string {
 		clientArch = "x86"
 	}
 
-	return xlsxLibJS + `
+	script := xlsxLibJS + `
 		// UserAgent and platform override to Google Chrome
 		Object.defineProperty(navigator, 'userAgent', {
 			get: () => '` + ua + `'
@@ -1040,25 +1043,45 @@ func getInitScript(ua string) string {
 			});
 		})();
 
-		// Floating HUD Toast for User Feedback
-		function showFloatingToast(msg) {
+		// Floating HUD Toast for User Feedback. Optional action renders a
+		// clickable button inside the toast (e.g. "Open folder" after a
+		// download); the toast then stays interactive for a few seconds longer.
+		function showFloatingToast(msg, action) {
 			var toast = document.getElementById('wa-hud-toast');
 			if (!toast) {
 				toast = document.createElement('div');
 				toast.id = 'wa-hud-toast';
-				toast.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(32,44,51,0.94);backdrop-filter:blur(10px);color:#00a884;border:1px solid rgba(0,168,132,0.4);border-radius:20px;padding:8px 20px;font-size:12.5px;font-weight:600;z-index:9999999;box-shadow:0 8px 24px rgba(0,0,0,0.6);pointer-events:none;transition:all 0.22s cubic-bezier(0.16,1,0.3,1);opacity:0;';
+				toast.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(32,44,51,0.94);backdrop-filter:blur(10px);color:#00a884;border:1px solid rgba(0,168,132,0.4);border-radius:20px;padding:8px 20px;font-size:12.5px;font-weight:600;z-index:9999999;box-shadow:0 8px 24px rgba(0,0,0,0.6);transition:all 0.22s cubic-bezier(0.16,1,0.3,1);opacity:0;display:flex;align-items:center;gap:12px;max-width:90vw;';
 				var parent = document.body || document.documentElement;
 				if (parent) parent.appendChild(toast);
 			}
 			if (!toast) return;
-			toast.textContent = msg;
+			toast.textContent = '';
+			toast.style.pointerEvents = 'none';
+			var label = document.createElement('span');
+			label.textContent = msg;
+			label.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+			toast.appendChild(label);
+			if (action && action.label && typeof action.onClick === 'function') {
+				toast.style.pointerEvents = 'auto';
+				var btn = document.createElement('button');
+				btn.textContent = action.label;
+				btn.style.cssText = 'background:#00a884;color:#111b21;border:none;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;';
+				btn.onclick = function(e) {
+					e.stopPropagation();
+					action.onClick();
+					toast.style.opacity = '0';
+				};
+				toast.appendChild(btn);
+			}
 			toast.style.opacity = '1';
 			toast.style.transform = 'translateX(-50%) translateY(4px)';
 			clearTimeout(toast._timer);
 			toast._timer = setTimeout(function() {
 				toast.style.opacity = '0';
 				toast.style.transform = 'translateX(-50%) translateY(0)';
-			}, 2500);
+				toast.style.pointerEvents = 'none';
+			}, action ? 6000 : 2500);
 		}
 
 		// Privacy Mode Toggle (Cmd + Shift + P)
@@ -1090,23 +1113,81 @@ func getInitScript(ua string) string {
 				'{ filter: blur(12px) !important; }'
 			].join('\n');
 
-			window.togglePrivacyMode = function() {
-				isPrivacyActive = !isPrivacyActive;
+			function applyPrivacyMode(active, silent) {
+				isPrivacyActive = !!active;
 				if (isPrivacyActive) {
 					if (!document.getElementById('whatsapp-privacy-style')) {
 						document.head.appendChild(styleEl);
 					}
 					document.body.classList.add('privacy-mode');
-					showFloatingToast('🔒 Privacy Mode: Enabled');
+					if (!silent) showFloatingToast('🔒 Privacy Mode: Enabled');
 				} else {
 					document.body.classList.remove('privacy-mode');
-					showFloatingToast('🔓 Privacy Mode: Disabled');
+					if (!silent) showFloatingToast('🔓 Privacy Mode: Disabled');
 				}
 				return isPrivacyActive;
+			}
+
+			window.togglePrivacyMode = function() {
+				// A manual toggle also cancels any pending auto-lock timer.
+				return applyPrivacyMode(!isPrivacyActive, false);
 			};
 			window.isPrivacyModeActive = function() {
 				return isPrivacyActive;
 			};
+
+			// Auto-lock on idle: the Control Center copy promises "blur chats and
+			// media when cursor is idle", so honor it. When enabled, the app
+			// blurs after a period of no mouse/keyboard activity, or immediately
+			// when the window loses focus, and unblurs on the next interaction.
+			// Persisted in localStorage so it survives reloads.
+			var AUTO_LOCK_KEY = 'wa_desk_privacy_autolock';
+			var autoLockEnabled = localStorage.getItem(AUTO_LOCK_KEY) === '1';
+			var IDLE_MS = 60000;
+			var idleTimer = null;
+			var autoLocked = false;
+
+			function isAutoLockEnabled() { return autoLockEnabled; }
+			function setAutoLockEnabled(on) {
+				autoLockEnabled = !!on;
+				localStorage.setItem(AUTO_LOCK_KEY, on ? '1' : '0');
+				if (!on && autoLocked) { autoLocked = false; applyPrivacyMode(false, true); }
+				if (on) resetIdleTimer();
+				return autoLockEnabled;
+			}
+			window.isPrivacyAutoLock = isAutoLockEnabled;
+			window.setPrivacyAutoLock = setAutoLockEnabled;
+
+			function lockForIdle() {
+				if (!autoLockEnabled || autoLocked) return;
+				autoLocked = true;
+				applyPrivacyMode(true, true);
+			}
+			function unlockFromIdle() {
+				if (!autoLocked) return;
+				autoLocked = false;
+				applyPrivacyMode(false, true);
+			}
+			function resetIdleTimer() {
+				clearTimeout(idleTimer);
+				if (!autoLockEnabled) return;
+				// If an idle-lock is active, any activity lifts it immediately.
+				unlockFromIdle();
+				idleTimer = setTimeout(lockForIdle, IDLE_MS);
+			}
+
+			var activityEvents = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'wheel'];
+			activityEvents.forEach(function(ev) {
+				window.addEventListener(ev, resetIdleTimer, { passive: true, capture: true });
+			});
+			// Losing window focus is the strongest "stepping away" signal.
+			window.addEventListener('blur', function() { if (autoLockEnabled) lockForIdle(); });
+			window.addEventListener('focus', function() { resetIdleTimer(); });
+			document.addEventListener('visibilitychange', function() {
+				if (document.hidden) { if (autoLockEnabled) lockForIdle(); }
+				else resetIdleTimer();
+			});
+			resetIdleTimer();
 
 			window.addEventListener('keydown', function(e) {
 				if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'p' || e.key === 'P')) {
@@ -1367,7 +1448,7 @@ func getInitScript(ua string) string {
 						} else if (res && res.check_error) {
 							showFloatingToast('⚠️ Update check failed: ' + res.check_error);
 						} else {
-							var cur = (res && res.current_version) ? res.current_version : '1.5.7';
+							var cur = (res && res.current_version) ? res.current_version : '__WA_APP_VERSION__';
 							showFloatingToast('✅ WhatsApp Desk is up to date (v' + cur + ')');
 						}
 						return res;
@@ -1439,6 +1520,15 @@ func getInitScript(ua string) string {
 				delete activeDownloadKeys[requestKey];
 			}
 
+			// Toast action: opens the downloads folder in Finder/Explorer.
+			function openFolderAction() {
+				if (!window.openDownloadDirNative) return null;
+				return {
+					label: 'Open folder',
+					onClick: function() { window.openDownloadDirNative(); }
+				};
+			}
+
 			function markDownloadComplete(requestKey, savedPath, blobSize) {
 				var completedRequest = { status: 'complete', savedPath: savedPath };
 				activeDownloadKeys[requestKey] = completedRequest;
@@ -1490,7 +1580,7 @@ func getInitScript(ua string) string {
 						if (blob.size && activeDownloadSizes[blob.size]) {
 							var savedPath = activeDownloadSizes[blob.size];
 							if (window.__waMarkSaved) window.__waMarkSaved(filename);
-							showFloatingToast(shouldAutoOpen ? ('📄 Already saved: ' + filename) : ('💾 File already saved: ' + filename));
+							showFloatingToast(shouldAutoOpen ? ('📄 Already saved: ' + filename) : ('💾 File already saved: ' + filename), openFolderAction());
 							if (shouldAutoOpen) {
 								var isPdfDup = filename.toLowerCase().endsWith('.pdf');
 								var dupBlobUrl = isPdfDup ? origCreateObjectURL(blob.slice(0, blob.size, 'application/pdf')) : '';
@@ -1513,9 +1603,9 @@ func getInitScript(ua string) string {
 										if (shouldAutoOpen) {
 											showInAppDocModal(filename, ownedBlobUrl || href, savedPath, base64data, ownedBlobUrl);
 											if (window.dismissStuckViewer) window.dismissStuckViewer();
-											showFloatingToast('📄 Preview opened: ' + filename);
+											showFloatingToast('📄 Preview opened: ' + filename, openFolderAction());
 										} else {
-											showFloatingToast('💾 Saved successfully: ' + filename);
+											showFloatingToast('💾 Saved successfully: ' + filename, openFolderAction());
 										}
 									} else {
 										if (ownedBlobUrl) URL.revokeObjectURL(ownedBlobUrl);
@@ -2062,7 +2152,7 @@ func getInitScript(ua string) string {
 					'  </div>' +
 					'  <div>' +
 					'    <h3 id="wa-modal-title" style="margin:0;font-size:15px;font-weight:600;">WhatsApp Desk</h3>' +
-					'    <span id="wa-modal-sub" style="font-size:11px;">Application settings · version 1.5.7</span>' +
+					'    <span id="wa-modal-sub" style="font-size:11px;">Application settings · version __WA_APP_VERSION__</span>' +
 					'  </div>' +
 					'</div>' +
 					'<button id="wa-settings-close-x" style="background:transparent;border:none;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;border-radius:4px;">✕</button>';
@@ -2091,19 +2181,25 @@ func getInitScript(ua string) string {
 				// Card 1: Privacy Mode
 				var cardPrivacy = document.createElement('div');
 				cardPrivacy.className = 'wa-modal-card';
-				cardPrivacy.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;';
+				cardPrivacy.style.cssText = 'border-radius:0;border-width:0 0 1px;border-style:solid;padding:12px 0;display:flex;flex-direction:column;gap:8px;';
 				cardPrivacy.innerHTML = '' +
-					'<div>' +
-					'  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
-					'    <strong class="wa-text-primary" style="font-size:12.5px;">Privacy Mode</strong>' +
-					'    <span id="wa-badge-priv" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">' +
+					'  <div>' +
+					'    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">' +
+					'      <strong class="wa-text-primary" style="font-size:12.5px;">Privacy Mode</strong>' +
+					'      <span id="wa-badge-priv" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
+					'    </div>' +
+					'    <div class="wa-text-muted" style="font-size:11px;">Blur chats and media until you turn this off.</div>' +
 					'  </div>' +
-					'  <div class="wa-text-muted" style="font-size:11px;">Blur chats and media until you turn this off.</div>' +
+					'  <div style="display:flex;align-items:center;justify-content:space-between;">' +
+					'    <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
+					'    <button id="wa-action-toggle-priv" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
+					'  </div>' +
 					'</div>' +
-					'<div style="display:flex;align-items:center;justify-content:space-between;">' +
-					'  <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
-					'  <button id="wa-action-toggle-priv" class="wa-card-btn" style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;">Toggle</button>' +
-					'</div>';
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-priv-autolock" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Auto-lock when idle or window loses focus (unblurs on activity)</span>' +
+					'</label>';
 				quickGrid.appendChild(cardPrivacy);
 
 				// Card 2: Always on Top
@@ -2178,7 +2274,11 @@ func getInitScript(ua string) string {
 					'<div style="display:flex;align-items:center;gap:6px;margin-top:2px;">' +
 					'  <button id="wa-btn-change-folder" class="wa-card-btn" style="flex:1;padding:6px 10px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;">Change Folder Location...</button>' +
 					'  <button id="wa-btn-open-folder" style="background:#00a884;color:#111b21;border:none;padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:600;cursor:pointer;">' + (isMac ? 'Open in Finder' : 'Open Folder') + '</button>' +
-					'</div>';
+					'</div>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;margin-top:2px;">' +
+					'  <input type="checkbox" id="wa-organize-month" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Organize into monthly subfolders (2026-09)</span>' +
+					'</label>';
 				modal.appendChild(folderSection);
 
 				// Section 3: Maintenance & Update Actions
@@ -2368,6 +2468,16 @@ func getInitScript(ua string) string {
 					if (window.togglePrivacyMode) window.togglePrivacyMode();
 					updateBadges();
 				};
+				var autoLockBox = document.getElementById('wa-priv-autolock');
+				if (autoLockBox) {
+					autoLockBox.checked = !!(window.isPrivacyAutoLock && window.isPrivacyAutoLock());
+					autoLockBox.onchange = function() {
+						if (window.setPrivacyAutoLock) window.setPrivacyAutoLock(autoLockBox.checked);
+						showFloatingToast(autoLockBox.checked ?
+							'🔒 Privacy auto-lock: on (blurs after 60s idle)' :
+							'🔓 Privacy auto-lock: off');
+					};
+				}
 				document.getElementById('wa-action-toggle-pin').onclick = function() {
 					if (window.toggleAlwaysOnTop) {
 						window.toggleAlwaysOnTop().then(function() { updateBadges(); });
@@ -2435,6 +2545,23 @@ func getInitScript(ua string) string {
 						});
 					}
 				};
+
+				var organizeBox = document.getElementById('wa-organize-month');
+				if (organizeBox) {
+					if (window.getOrganizeByMonthNative) {
+						window.getOrganizeByMonthNative().then(function(on) {
+							organizeBox.checked = !!on;
+						}).catch(function() {});
+					}
+					organizeBox.onchange = function() {
+						if (!window.setOrganizeByMonthNative) return;
+						window.setOrganizeByMonthNative(organizeBox.checked).then(function(applied) {
+							showFloatingToast(applied ?
+								'🗂️ Downloads will be organized into monthly folders.' :
+								'🗂️ Downloads save directly to the folder again.');
+						}).catch(function() {});
+					};
+				}
 			};
 
 			// Keyboard Shortcut: Cmd/Ctrl + , (Settings) and Cmd/Ctrl + Shift + D (Open Download Folder)
@@ -2452,6 +2579,9 @@ func getInitScript(ua string) string {
 			});
 		})();
 	` + "\n" + getOnboardingScript()
+	// Single source of truth: every UI version string flows from appVersion
+	// (overridable at link time via -ldflags "-X main.appVersion=...").
+	return strings.ReplaceAll(script, "__WA_APP_VERSION__", appVersion)
 }
 
 type WindowState struct {
@@ -2459,9 +2589,18 @@ type WindowState struct {
 	Y      float64 `json:"y"`
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
+	// Screens maps a stable display identifier (macOS NSScreenNumber) to the
+	// frame the window had on that monitor. Only macOS populates it; other
+	// platforms round-trip it unchanged.
+	Screens map[string]WindowState `json:"screens,omitempty"`
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			writeCrashReport("main", r)
+		}
+	}()
 	if !validateBuildEnvironment() {
 		return
 	}
