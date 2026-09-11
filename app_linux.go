@@ -60,7 +60,11 @@ static int getWindowFrameLinux(void* winPtr, int* x, int* y, int* w, int* h) {
 	GtkWidget* win = GTK_WIDGET(winPtr);
 	if (!win) return 0;
 	gtk_window_get_size(GTK_WINDOW(win), w, h);
-	return gtk_window_get_position(GTK_WINDOW(win), x, y) ? 1 : 0;
+	// gtk_window_get_position returns void and never reports a position on
+	// Wayland, so pre-zero x/y and report success whenever a window exists.
+	*x = 0; *y = 0;
+	gtk_window_get_position(GTK_WINDOW(win), x, y);
+	return 1;
 }
 
 // Verify a saved frame still overlaps a connected monitor's geometry.
@@ -557,12 +561,6 @@ func initSystemTrayLinux(iconPath string) {
 func shutdownSystemTrayLinux() {
 	C.tray_shutdown()
 }
-
-//go:build linux
-// +build linux
-
-import "C"
-import "unsafe"
 
 func getAutoStartDesktopPath() string {
 	home, err := os.UserHomeDir()
