@@ -1087,10 +1087,7 @@ func getInitScript(ua string) string {
 				// don't exist — still bounded to visible message bubbles, not
 				// every img/video in the DOM.
 				'.privacy-mode .message-in, .privacy-mode .message-out',
-				'{ filter: blur(12px) !important; }',
-				// No transition on filter anywhere: the blur appears instantly
-				// and the compositor reuses one layer per container.
-				'.privacy-mode * { transition: none !important; }'
+				'{ filter: blur(12px) !important; }'
 			].join('\n');
 
 			window.togglePrivacyMode = function() {
@@ -1446,6 +1443,10 @@ func getInitScript(ua string) string {
 				var completedRequest = { status: 'complete', savedPath: savedPath };
 				activeDownloadKeys[requestKey] = completedRequest;
 				if (blobSize) activeDownloadSizes[blobSize] = savedPath;
+				// Tell the badge layer this filename is now on disk so the next
+				// scan badges it without a redundant native stat.
+				var savedBase = (savedPath || '').split(/[\\/]/).pop();
+				if (savedBase && window.__waMarkSaved) window.__waMarkSaved(savedBase);
 				// Retain only the tiny path entry, never the Blob or base64 payload.
 				setTimeout(function() {
 					if (activeDownloadKeys[requestKey] === completedRequest) {
@@ -1488,6 +1489,7 @@ func getInitScript(ua string) string {
 						// byte-identical duplicates as a final backstop.
 						if (blob.size && activeDownloadSizes[blob.size]) {
 							var savedPath = activeDownloadSizes[blob.size];
+							if (window.__waMarkSaved) window.__waMarkSaved(filename);
 							showFloatingToast(shouldAutoOpen ? ('📄 Already saved: ' + filename) : ('💾 File already saved: ' + filename));
 							if (shouldAutoOpen) {
 								var isPdfDup = filename.toLowerCase().endsWith('.pdf');
@@ -1718,22 +1720,34 @@ func getInitScript(ua string) string {
 		// configured downloads folder and tag it with a small green check.
 		(function() {
 			var savedScanQueued = false;
+			var lastSavedScanAt = 0;
 			var savedCache = {};
+			var savedPending = {};
 			var badgeStyle = 'display:inline-flex;align-items:center;gap:2px;margin-left:6px;padding:0 6px;border-radius:8px;' +
 				'font-size:10px;font-weight:600;line-height:14px;vertical-align:middle;background:rgba(6,174,116,.16);color:#06ae74;';
-
-			function ensureDownloadDir() {
-				return window.getDownloadDirNative ? window.getDownloadDirNative() : Promise.resolve('');
-			}
 
 			function fileExistsOnDisk(name) {
 				if (!name || !window.checkFileExistsNative) return Promise.resolve(false);
 				if (name in savedCache) return Promise.resolve(savedCache[name]);
-				return window.checkFileExistsNative(name).then(function(exists) {
+				// Coalesce concurrent lookups for the same name: repeated scans
+				// while a check is in flight must not spam the native binding.
+				if (savedPending[name]) return savedPending[name];
+				var p = window.checkFileExistsNative(name).then(function(exists) {
+					delete savedPending[name];
 					savedCache[name] = !!exists;
 					return !!exists;
-				}).catch(function() { return false; });
+				}).catch(function() {
+					delete savedPending[name];
+					return false;
+				});
+				savedPending[name] = p;
+				return p;
 			}
+
+			// Called by the download path so a just-saved file badges instantly.
+			window.__waMarkSaved = function(name) {
+				if (name) savedCache[name] = true;
+			};
 
 			function decorateItem(el, name) {
 				if (el.__waSavedBadge) return;
@@ -1764,9 +1778,14 @@ func getInitScript(ua string) string {
 			}
 
 			function scanPanel() {
-				// The all-chats media panel and per-chat media/doc lists share row
-				// test ids; document rows expose a filename in their title spans.
-				var rows = document.querySelectorAll('[data-testid="media-viewer"], [role="row"], [data-testid="cell-frame-outer"]');
+				// Only scan where items can actually be seen: the open media/docs
+				// panel (dialog/viewer) or the current chat pane. Scanning the
+				// whole document on every chat-list mutation is exactly the
+				// background churn this app is supposed to avoid.
+				var scope = document.querySelector('[role="dialog"], [data-testid="media-viewer"]') ||
+					document.getElementById('main');
+				if (!scope) return;
+				var rows = scope.querySelectorAll('[role="row"], [data-testid="cell-frame-outer"], .message-in, .message-out');
 				for (var i = 0; i < rows.length; i++) {
 					var row = rows[i];
 					if (row.__waSavedBadge) continue;
@@ -1777,14 +1796,18 @@ func getInitScript(ua string) string {
 
 			function scheduleScan() {
 				if (savedScanQueued || shouldPauseBackgroundWork()) return;
+				// Hard throttle: the panel observer fires on every DOM mutation
+				// while WhatsApp virtualizes lists; 1s between scans is plenty.
+				var now = Date.now();
+				if (now - lastSavedScanAt < 1000) return;
 				savedScanQueued = true;
 				requestAnimationFrame(function() {
 					savedScanQueued = false;
+					lastSavedScanAt = Date.now();
 					scanPanel();
 				});
 			}
 
-			ensureDownloadDir();
 			// Observe panel/dialog appearances instead of polling.
 			var panelObserver = new MutationObserver(scheduleScan);
 			function watchRoot() {
