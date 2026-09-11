@@ -1,0 +1,67 @@
+# NOTE: this repo gitignores .github/ and the core *_*.go implementation files,
+# so this workflow is a local reference — copy it into a release repo to use.
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build macOS bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash build_mac.sh "${VERSION:-1.5.7}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            WhatsApp-Desk-macOS-Universal.dmg
+            WhatsApp-Desk-macOS-Universal.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build Windows binary
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash build.sh windows "${VERSION:-1.5.7}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            WhatsAppDesk.exe
+            WhatsApp-Desk-Windows-x64.zip
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install WebKitGTK deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+      - name: Build Linux packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash build_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            WhatsApp-Desk-Linux-x64.tar.gz
+            WhatsApp-Desk-Linux-amd64.deb
