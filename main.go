@@ -49,33 +49,11 @@ func getInitScript(ua string) string {
 			delete window.safari;
 		} catch (e) {}
 
-		// Best-effort Content-Security-Policy hardening. The webview bindings
-		// don't expose response headers, so enforce via <meta> instead: allow
-		// WhatsApp first-party hosts plus the blob:/data:/wss: schemes the app
-		// itself relies on (media blobs, PDF preview, live sync), while keeping
-		// 'unsafe-inline'/'unsafe-eval' only for scripts because WhatsApp Web
-		// and the bundled SheetJS loader require them to run at all.
-		(function() {
-			try {
-				if (document.querySelector('meta[http-equiv="Content-Security-Policy"]#wa-desk-csp')) return;
-				var meta = document.createElement('meta');
-				meta.id = 'wa-desk-csp';
-				meta.httpEquiv = 'Content-Security-Policy';
-				meta.content = [
-					"default-src 'self' https://*.whatsapp.com https://*.whatsapp.net blob: data:",
-					"script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.whatsapp.com https://*.whatsapp.net blob:",
-					"style-src 'self' 'unsafe-inline' https://*.whatsapp.com https://*.whatsapp.net",
-					"img-src 'self' https: blob: data:",
-					"media-src 'self' https: blob: data:",
-					"connect-src 'self' https://*.whatsapp.com https://*.whatsapp.net wss://*.whatsapp.com wss://*.whatsapp.net blob:",
-					"frame-src 'self' blob: data:",
-					"object-src 'none'",
-					"base-uri 'self'"
-				].join('; ');
-				var head = document.head || document.documentElement;
-				if (head) head.insertBefore(meta, head.firstChild);
-			} catch (e) {}
-		})();
+		// NOTE (v1.5.9): a <meta> Content-Security-Policy allowlist was tried in
+		// v1.5.8 and REVERTED — WhatsApp Web loads its boot bundles from Meta
+		// CDN hosts outside any maintainable allowlist, so the policy blocked
+		// boot and left the app stuck on the splash screen. Do not re-add a
+		// meta CSP without a report-only phase first.
 
 		function shouldPauseBackgroundWork() {
 			return document.hidden === true;

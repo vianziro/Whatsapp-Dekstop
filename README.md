@@ -20,7 +20,7 @@ The screenshots use blurred chat content to protect personal information.
 
 ## Download
 
-Current release: **v1.5.8**
+Current release: **v1.5.9**
 
 | Platform | Download |
 | --- | --- |
@@ -88,6 +88,11 @@ Default profile locations:
 - macOS: `~/Library/Application Support/WhatsAppDesk/UserData/`
 - Windows: `%APPDATA%\WhatsAppDesk\UserData\`
 - Linux: `~/.config/whatsapp-desk/`
+
+## Version 1.5.9
+
+- Critical fix: removed the v1.5.8 CSP policy that blocked WhatsApp boot bundles and left the app stuck on the splash screen.
+- If you installed v1.5.8, update to v1.5.9 (in-app updater or fresh download).
 
 ## Version 1.5.8
 
