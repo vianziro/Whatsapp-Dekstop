@@ -1,0 +1,46 @@
+WhatsApp.exe
+WhatsAppDesk.exe
+WhatsAppDesktopLight.exe
+WhatsApp.exe~
+WhatsApp_*
+icon_1024.png
+*.app
+!AppIcon.icns
+*.dmg
+*.zip
+*.tmp
+*.log
+.github/
+config_private.go
+build_mac.sh
+build_linux.sh
+dmg_background.png
+whatsapp-desktop
+
+# Core proprietary implementation files
+app_darwin.go
+app_windows.go
+app_linux.go
+updater.go
+updater_darwin.go
+updater_linux.go
+updater_windows.go
+settings.go
+settings_darwin.go
+settings_linux.go
+settings_windows.go
+onboarding.go
+
+# Unit and regression tests
+*_test.go
+main_test.go
+
+# Internal project documentation & state
+MEMORY.md
+DESIGN.md
+PRODUCT.md
+.impeccable/
+
+# Local-only (never publish)
+BENCHMARK_RESULTS.md
+WhatsAppDesk.entitlements
