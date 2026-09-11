@@ -20,7 +20,7 @@ The screenshots use blurred chat content to protect personal information.
 
 ## Download
 
-Current release: **v1.5.7**
+Current release: **v1.5.8**
 
 | Platform | Download |
 | --- | --- |
@@ -88,6 +88,15 @@ Default profile locations:
 - macOS: `~/Library/Application Support/WhatsAppDesk/UserData/`
 - Windows: `%APPDATA%\WhatsAppDesk\UserData\`
 - Linux: `~/.config/whatsapp-desk/`
+
+## Version 1.5.8
+
+- Native folder picker on Linux (GTK) and system tray with quick controls.
+- Unified settings storage and extended WebView2 cache cleanup on Windows.
+- Drag & drop files into chat, native spellcheck, and search/translate context menu.
+- Taskbar progress badge on Windows and tray unread indicator on Linux.
+- Hardened runtime on macOS, lazy spreadsheet engine, and CSP hardening.
+- Unified `build.sh` and CI builds for macOS, Windows, and Linux.
 
 ## Version 1.5.7
 

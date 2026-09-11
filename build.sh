@@ -4,7 +4,7 @@
 # Delegates to the per-OS scripts so packaging logic stays in one place each.
 set -e
 
-VERSION="${2:-1.5.7}"  # single source of truth, injected via -X main.appVersion
+VERSION="${2:-1.5.8}"  # single source of truth, injected via -X main.appVersion
 TARGET="${1:-all}"
 
 export WA_DESK_VERSION="${VERSION}"
