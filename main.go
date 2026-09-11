@@ -24,7 +24,7 @@ func getInitScript(ua string) string {
 		clientArch = "x86"
 	}
 
-	script := xlsxLibJS + `
+	script := `
 		// UserAgent and platform override to Google Chrome
 		Object.defineProperty(navigator, 'userAgent', {
 			get: () => '` + ua + `'
@@ -48,6 +48,34 @@ func getInitScript(ua string) string {
 		try {
 			delete window.safari;
 		} catch (e) {}
+
+		// Best-effort Content-Security-Policy hardening. The webview bindings
+		// don't expose response headers, so enforce via <meta> instead: allow
+		// WhatsApp first-party hosts plus the blob:/data:/wss: schemes the app
+		// itself relies on (media blobs, PDF preview, live sync), while keeping
+		// 'unsafe-inline'/'unsafe-eval' only for scripts because WhatsApp Web
+		// and the bundled SheetJS loader require them to run at all.
+		(function() {
+			try {
+				if (document.querySelector('meta[http-equiv="Content-Security-Policy"]#wa-desk-csp')) return;
+				var meta = document.createElement('meta');
+				meta.id = 'wa-desk-csp';
+				meta.httpEquiv = 'Content-Security-Policy';
+				meta.content = [
+					"default-src 'self' https://*.whatsapp.com https://*.whatsapp.net blob: data:",
+					"script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.whatsapp.com https://*.whatsapp.net blob:",
+					"style-src 'self' 'unsafe-inline' https://*.whatsapp.com https://*.whatsapp.net",
+					"img-src 'self' https: blob: data:",
+					"media-src 'self' https: blob: data:",
+					"connect-src 'self' https://*.whatsapp.com https://*.whatsapp.net wss://*.whatsapp.com wss://*.whatsapp.net blob:",
+					"frame-src 'self' blob: data:",
+					"object-src 'none'",
+					"base-uri 'self'"
+				].join('; ');
+				var head = document.head || document.documentElement;
+				if (head) head.insertBefore(meta, head.firstChild);
+			} catch (e) {}
+		})();
 
 		function shouldPauseBackgroundWork() {
 			return document.hidden === true;
@@ -434,6 +462,98 @@ func getInitScript(ua string) string {
 			}
 		}, true);
 
+		// Drag & Drop file upload to chat
+		(function() {
+			var dropZone = null;
+			var dragCounter = 0;
+
+			function getDropZone() {
+				// WhatsApp Web's main chat area where files can be dropped
+				return document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel"]') || document.body;
+			}
+
+			function handleDragEnter(e) {
+				dragCounter++;
+				e.preventDefault();
+				e.stopPropagation();
+				var dz = getDropZone();
+				if (dz) dz.classList.add('wa-drag-over');
+			}
+
+			function handleDragLeave(e) {
+				dragCounter--;
+				if (dragCounter <= 0) {
+					dragCounter = 0;
+					var dz = getDropZone();
+					if (dz) dz.classList.remove('wa-drag-over');
+				}
+			}
+
+			function handleDragOver(e) {
+				e.preventDefault();
+				e.stopPropagation();
+				e.dataTransfer.dropEffect = 'copy';
+			}
+
+			async function handleDrop(e) {
+				e.preventDefault();
+				e.stopPropagation();
+				dragCounter = 0;
+				var dz = getDropZone();
+				if (dz) dz.classList.remove('wa-drag-over');
+
+				var files = e.dataTransfer.files;
+				if (!files || files.length === 0) return;
+
+				// Find the file input for the attach menu
+				var attachBtn = document.querySelector('[data-testid="clip"], [data-icon="clip"], [aria-label*="Attach"], [aria-label*="Lampirkan"]');
+				if (attachBtn) {
+					attachBtn.click();
+					// Wait for the file input to appear
+					setTimeout(function() {
+						var fileInput = document.querySelector('input[type="file"][accept*="*"], input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"][accept*="document"], input[type="file"][accept*="audio"]');
+						if (fileInput && fileInput.files.length === 0) {
+							// Create a DataTransfer to set files on the input
+							var dt = new DataTransfer();
+							for (var i = 0; i < files.length; i++) {
+								dt.items.add(files[i]);
+							}
+							fileInput.files = dt.files;
+							// Trigger change event
+							var event = new Event('change', { bubbles: true });
+							fileInput.dispatchEvent(event);
+						}
+					}, 100);
+				}
+			}
+
+			function initDragDrop() {
+				var dz = getDropZone();
+				if (dz) {
+					dz.addEventListener('dragenter', handleDragEnter, true);
+					dz.addEventListener('dragleave', handleDragLeave, true);
+					dz.addEventListener('dragover', handleDragOver, true);
+					dz.addEventListener('drop', handleDrop, true);
+				}
+			}
+
+			// Initialize when DOM is ready
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', initDragDrop);
+			} else {
+				initDragDrop();
+			}
+
+			// Re-initialize on navigation (WhatsApp Web is SPA)
+			var lastUrl = location.href;
+			setInterval(function() {
+				if (location.href !== lastUrl) {
+					lastUrl = location.href;
+					setTimeout(initDragDrop, 500);
+				}
+			}, 1000);
+		})();
+
 		// Helper: Decode base64 dataURI to Uint8Array
 		function base64ToUint8Array(dataUri) {
 			try {
@@ -687,6 +807,29 @@ func getInitScript(ua string) string {
 				};
 			}
 
+			// Lazy-load SheetJS (xlsx.core.min.js) only when spreadsheet preview is first needed.
+			var xlsxLoadPromise = null;
+			function ensureXLSXLoaded() {
+				if (window.XLSX) return Promise.resolve();
+				if (xlsxLoadPromise) return xlsxLoadPromise;
+				xlsxLoadPromise = new Promise(function(resolve, reject) {
+					// Fetch the bundled SheetJS from the native side
+					if (window.loadXLSXLibraryNative) {
+						window.loadXLSXLibraryNative().then(function(jsCode) {
+							try {
+								eval(jsCode);
+								resolve();
+							} catch (e) {
+								reject(e);
+							}
+						}).catch(reject);
+					} else {
+						reject(new Error('loadXLSXLibraryNative not available'));
+					}
+				});
+				return xlsxLoadPromise;
+			}
+
 			// Render a parsed spreadsheet workbook (from the bundled SheetJS library) as an
 			// HTML table, with a sheet-switcher tab bar when the workbook has multiple sheets.
 			function renderSpreadsheetPreview(workbook, activeSheetName) {
@@ -740,20 +883,24 @@ func getInitScript(ua string) string {
 				}
 			} else if (ext === 'csv' || ext === 'xlsx' || ext === 'xls') {
 				body.innerHTML = '<div style="color:#8696a0;font-size:13px;display:flex;align-items:center;gap:8px;">⏳ Loading spreadsheet preview...</div>';
-				try {
-					var rawXlsxB64 = (dataUri || '').indexOf(';base64,') !== -1 ? dataUri.split(';base64,')[1] : (dataUri || '');
-					if (rawXlsxB64 && window.XLSX) {
-						// SheetJS auto-detects the real format from the bytes (OOXML zip for
-						// .xlsx, binary OLE2/BIFF for legacy .xls, or plain text for .csv), so
-						// one code path correctly previews all three, including .xls which the
-						// previous hand-rolled parser never actually supported.
-						var workbook = XLSX.read(rawXlsxB64, { type: 'base64', cellDates: true });
-						renderSpreadsheetPreview(workbook);
-					} else {
-						renderCardFallback();
-					}
-				} catch (e) {
-					renderCardFallback('Unable to render an in-app preview for this spreadsheet. Click below to open it in your default application.');
+				var rawXlsxB64 = (dataUri || '').indexOf(';base64,') !== -1 ? dataUri.split(';base64,')[1] : (dataUri || '');
+				if (rawXlsxB64) {
+					ensureXLSXLoaded().then(function() {
+						try {
+							// SheetJS auto-detects the real format from the bytes (OOXML zip for
+							// .xlsx, binary OLE2/BIFF for legacy .xls, or plain text for .csv), so
+							// one code path correctly previews all three, including .xls which the
+							// previous hand-rolled parser never actually supported.
+							var workbook = XLSX.read(rawXlsxB64, { type: 'base64', cellDates: true });
+							renderSpreadsheetPreview(workbook);
+						} catch (e) {
+							renderCardFallback('Unable to render an in-app preview for this spreadsheet. Click below to open it in your default application.');
+						}
+					}).catch(function() {
+						renderCardFallback('Unable to load spreadsheet library.');
+					});
+				} else {
+					renderCardFallback();
 				}
 			} else if (ext === 'docx') {
 				body.innerHTML = '<div style="color:#8696a0;font-size:13px;display:flex;align-items:center;gap:8px;">⏳ Loading Word preview...</div>';
@@ -1110,7 +1257,10 @@ func getInitScript(ua string) string {
 				// don't exist — still bounded to visible message bubbles, not
 				// every img/video in the DOM.
 				'.privacy-mode .message-in, .privacy-mode .message-out',
-				'{ filter: blur(12px) !important; }'
+				'{ filter: blur(12px) !important; }',
+				// Drag & drop visual feedback
+				'.wa-drag-over { outline: 3px solid #00a884; outline-offset: -3px; }',
+				'.wa-drag-over * { pointer-events: none; }'
 			].join('\n');
 
 			function applyPrivacyMode(active, silent) {
@@ -1501,6 +1651,183 @@ func getInitScript(ua string) string {
 				injectResponsive();
 				observer.disconnect();
 			}, { once: true });
+		})();
+
+		// Native Spell Check for textareas (macOS NSSpellChecker, Windows ISpellCheckProvider, Linux GTK)
+		(function() {
+			var spellCheckEnabled = true;
+			var spellCheckLang = 'auto';
+
+			function enableSpellCheckOnTextareas() {
+				var textareas = document.querySelectorAll('textarea[contenteditable="true"], div[contenteditable="true"][role="textbox"], textarea');
+				textareas.forEach(function(el) {
+					if (!el.dataset.spellCheckInitialized) {
+						el.dataset.spellCheckInitialized = 'true';
+						el.spellcheck = spellCheckEnabled;
+						if (spellCheckLang !== 'auto') {
+							el.lang = spellCheckLang;
+						}
+					}
+				});
+			}
+
+			function initSpellCheck() {
+				// Initial enable
+				enableSpellCheckOnTextareas();
+
+				// Watch for new textareas (WhatsApp Web is SPA)
+				var observer = new MutationObserver(function(mutations) {
+					var shouldCheck = false;
+					for (var i = 0; i < mutations.length; i++) {
+						if (mutations[i].addedNodes.length > 0) {
+							shouldCheck = true;
+							break;
+						}
+					}
+					if (shouldCheck) {
+						setTimeout(enableSpellCheckOnTextareas, 100);
+					}
+				});
+				observer.observe(document.body, { childList: true, subtree: true });
+
+				// Also re-check on navigation
+				var lastUrl = location.href;
+				setInterval(function() {
+					if (location.href !== lastUrl) {
+						lastUrl = location.href;
+						setTimeout(enableSpellCheckOnTextareas, 300);
+					}
+				}, 1000);
+			}
+
+			// Expose toggle for settings
+			window.toggleSpellCheck = function(enabled) {
+				spellCheckEnabled = !!enabled;
+				enableSpellCheckOnTextareas();
+				if (window.setSpellCheckNative) {
+					window.setSpellCheckNative(spellCheckEnabled);
+				}
+			};
+
+			window.setSpellCheckLanguage = function(lang) {
+				spellCheckLang = lang;
+				enableSpellCheckOnTextareas();
+			};
+
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', initSpellCheck);
+			} else {
+				initSpellCheck();
+			}
+		})();
+
+		// Context Menu: Search/Translate selected text
+		(function() {
+			var contextMenu = null;
+			var lastSelection = '';
+			var lastSelectionRect = null;
+
+			function createContextMenu() {
+				if (contextMenu) return;
+				contextMenu = document.createElement('div');
+				contextMenu.id = 'wa-context-menu';
+				contextMenu.style.cssText = 'position:fixed;z-index:9999999;background:#202c33;border:1px solid #2a3942;border-radius:8px;padding:6px 0;box-shadow:0 8px 24px rgba(0,0,0,0.4);min-width:180px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:13px;color:#e9edef;';
+				contextMenu.innerHTML = '' +
+					'<div class="wa-cm-item" data-action="search" style="padding:8px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;">' +
+					'  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#00a884;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>' +
+					'  <span>Search on Google</span>' +
+					'</div>' +
+					'<div class="wa-cm-item" data-action="translate" style="padding:8px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;">' +
+					'  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#00a884;"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path><line x1="12" y1="12" x2="12" y2="12"></line></svg>' +
+					'  <span>Translate</span>' +
+					'</div>' +
+					'<hr style="margin:6px 8px;border:none;border-top:1px solid #2a3942;">' +
+					'<div class="wa-cm-item" data-action="copy" style="padding:8px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;">' +
+					'  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#8696a0;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>' +
+					'  <span>Copy</span>' +
+					'</div>';
+				document.body.appendChild(contextMenu);
+
+				contextMenu.querySelectorAll('.wa-cm-item').forEach(function(item) {
+					item.addEventListener('mouseenter', function() {
+						this.style.background = '#2a3942';
+					});
+					item.addEventListener('mouseleave', function() {
+						this.style.background = 'transparent';
+					});
+					item.addEventListener('click', function() {
+						var action = this.dataset.action;
+						handleContextAction(action);
+						hideContextMenu();
+					});
+				});
+
+				document.addEventListener('click', hideContextMenu, true);
+				document.addEventListener('scroll', hideContextMenu, true);
+			}
+
+			function showContextMenu(x, y, text) {
+				createContextMenu();
+				lastSelection = text;
+				contextMenu.style.left = x + 'px';
+				contextMenu.style.top = y + 'px';
+				contextMenu.style.display = 'block';
+			}
+
+			function hideContextMenu() {
+				if (contextMenu) {
+					contextMenu.style.display = 'none';
+				}
+			}
+
+			function handleContextAction(action) {
+				if (!lastSelection) return;
+				var encoded = encodeURIComponent(lastSelection);
+				if (action === 'search') {
+					window.openExternalLink && window.openExternalLink('https://www.google.com/search?q=' + encoded);
+				} else if (action === 'translate') {
+					window.openExternalLink && window.openExternalLink('https://translate.google.com/?sl=auto&tl=id&text=' + encoded + '&op=translate');
+				} else if (action === 'copy') {
+					navigator.clipboard.writeText(lastSelection).then(function() {
+						if (window.showFloatingToast) window.showFloatingToast('📋 Copied to clipboard');
+					});
+				}
+			}
+
+			function getSelectedText() {
+				var selection = window.getSelection();
+				if (!selection || selection.rangeCount === 0) return '';
+				var text = selection.toString().trim();
+				return text.length > 0 && text.length < 500 ? text : '';
+			}
+
+			function onContextMenu(e) {
+				var text = getSelectedText();
+				if (text) {
+					e.preventDefault();
+					showContextMenu(e.clientX, e.clientY, text);
+				}
+			}
+
+			document.addEventListener('contextmenu', onContextMenu, true);
+
+			// Also show on long-press for touch devices
+			var longPressTimer = null;
+			document.addEventListener('touchstart', function(e) {
+				var text = getSelectedText();
+				if (text) {
+					longPressTimer = setTimeout(function() {
+						var touch = e.touches[0];
+						showContextMenu(touch.clientX, touch.clientY, text);
+					}, 500);
+				}
+			}, { passive: true });
+			document.addEventListener('touchend', function() {
+				if (longPressTimer) clearTimeout(longPressTimer);
+			});
+			document.addEventListener('touchmove', function() {
+				if (longPressTimer) clearTimeout(longPressTimer);
+			});
 		})();
 
 		// Automatic Download & Document Preview Interceptor for Chat Files & Media
