@@ -36,12 +36,10 @@ static const char* windowMonitorName(void* winPtr) {
 	GdkMonitor* mon = gdk_display_get_monitor_at_window(display, gw);
 	if (!mon) return "";
 	const char* model = gdk_monitor_get_model(mon);
-	const char* connector = gdk_monitor_get_connector(mon);
-	if (connector && connector[0]) {
-		snprintf(g_monitorNameBuf, sizeof(g_monitorNameBuf), "%s|%s", connector, model ? model : "");
-	} else {
-		snprintf(g_monitorNameBuf, sizeof(g_monitorNameBuf), "%s", model ? model : "");
-	}
+	GdkRectangle geo;
+	gdk_monitor_get_geometry(mon, &geo);
+	snprintf(g_monitorNameBuf, sizeof(g_monitorNameBuf), "%s@%d,%d",
+		model ? model : "?", geo.x, geo.y);
 	return g_monitorNameBuf;
 }
 
@@ -101,12 +99,21 @@ static void setWhatsAppDeskKeepAbove(int enable) {
 }
 
 // --- System Tray (StatusNotifierItem via DBus) ---
+//
+// Minimal but spec-correct: icon + Activate-to-show + unread tooltip.
+// There is deliberately NO menu: the SNI menu protocol is com.canonical
+// dbusmenu (not a custom interface), and wiring its clicks back into Go
+// actions cannot be verified without a Linux desktop to test on.
+
+#define TRAY_BUS_NAME "org.kde.StatusNotifierItem-whatsapp-desk"
+#define TRAY_OBJ_PATH "/StatusNotifierItem"
 
 static GDBusConnection* g_dbus_conn = NULL;
 static guint g_dbus_reg_id = 0;
 static GDBusNodeInfo* g_introspection = NULL;
 static char g_tray_icon_path[512] = {0};
 static int g_tray_visible = 0;
+static int g_unread_count = 0;
 
 static const gchar tray_introspection_xml[] =
 	"<node>"
@@ -137,26 +144,14 @@ static const gchar tray_introspection_xml[] =
 	"    <property name='AttentionIconName' type='s' access='read'/>"
 	"    <property name='AttentionIconPixmap' type='a(iiay)' access='read'/>"
 	"    <property name='AttentionMovieName' type='s' access='read'/>"
-	"    <property name='ToolTip' type='s' access='read'/>"
+	"    <property name='ToolTip' type='(sa(iiay)ss)' access='read'/>"
 	"    <property name='Category' type='s' access='read'/>"
-	"    <property name='Menu' type='o' access='read'/>"
 	"    <signal name='NewTitle'/>"
 	"    <signal name='NewStatus'/>"
 	"    <signal name='NewIcon'/>"
 	"    <signal name='NewAttentionIcon'/>"
 	"    <signal name='NewOverlayIcon'/>"
 	"    <signal name='NewToolTip'/>"
-	"  </interface>"
-	"  <interface name='org.kde.StatusNotifierItem.Menu'>"
-	"    <method name='AboutToShow'>"
-	"      <arg name='parent' type='i' direction='in'/>"
-	"    </method>"
-	"    <method name='AboutToShowGroup'>"
-	"      <arg name='parent' type='i' direction='in'/>"
-	"      <arg name='group' type='i' direction='in'/>"
-	"    </method>"
-	"    <property name='Items' type='a(iisssis)' access='read'/>"
-	"    <signal name='ItemsChanged'/>"
 	"  </interface>"
 	"  <interface name='org.freedesktop.DBus.Properties'>"
 	"    <method name='Get'>"
@@ -181,12 +176,27 @@ static const gchar tray_introspection_xml[] =
 	"  </interface>"
 	"</node>";
 
-static GVariant* tray_build_menu_items(void);
-
 static char g_overlay_icon_name[64] = {0};
 static int g_has_overlay = 0;
 
-static GVariant* tray_get_property(const gchar* interface, const gchar* property, GError** error) {
+static void tray_show_window(void) {
+	GtkWindow* top = NULL;
+	GList* toplevels = gtk_window_list_toplevels();
+	for (GList* l = toplevels; l != NULL; l = l->next) {
+		GtkWindow* w = GTK_WINDOW(l->data);
+		if (gtk_window_get_window_type(w) == GTK_WINDOW_TOPLEVEL && !gtk_window_get_transient_for(w)) {
+			top = w;
+		}
+	}
+	g_list_free(toplevels);
+	if (top) {
+		gtk_window_deiconify(top);
+		gtk_window_present(top);
+	}
+}
+
+static GVariant* tray_get_property(GDBusConnection* conn, const gchar* sender, const gchar* object_path, const gchar* interface, const gchar* property, GError** error, gpointer user_data) {
+	(void)conn; (void)sender; (void)object_path; (void)user_data;
 	if (strcmp(interface, "org.kde.StatusNotifierItem") == 0) {
 		if (strcmp(property, "Id") == 0) {
 			return g_variant_new_string("whatsapp-desk");
@@ -216,33 +226,30 @@ static GVariant* tray_get_property(const gchar* interface, const gchar* property
 			return g_variant_new_from_data(G_VARIANT_TYPE("a(iiay)"), NULL, 0, TRUE, NULL, NULL);
 		}
 		if (strcmp(property, "ToolTip") == 0) {
-			return g_variant_new_string("WhatsApp Desk");
-		}
-		if (strcmp(property, "Menu") == 0) {
-			// Return object path for menu
-			return g_variant_new_object_path("/org/kde/StatusNotifierItem/Menu");
-		}
-	}
-	if (strcmp(interface, "org.kde.StatusNotifierItem.Menu") == 0) {
-		if (strcmp(property, "Items") == 0) {
-			return tray_build_menu_items();
+			GVariant* empty = g_variant_new_from_data(G_VARIANT_TYPE("a(iiay)"), NULL, 0, TRUE, NULL, NULL);
+			char tip[96];
+			if (g_unread_count > 0) snprintf(tip, sizeof(tip), "%d unread message(s)", g_unread_count);
+			else snprintf(tip, sizeof(tip), "No unread messages");
+			return g_variant_new("(sa(iiay)ss)", "whatsapp-desk", empty, "WhatsApp Desk", tip);
 		}
 	}
 	g_set_error(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property %s.%s", interface, property);
 	return NULL;
 }
 
-static gboolean tray_method_call(GDBusConnection* conn, const gchar* sender, const gchar* object_path,
-                                  const gchar* interface, const gchar* method,
-                                  GVariant* params, GDBusMethodInvocation* invocation, gpointer user_data) {
+static void tray_method_call(GDBusConnection* conn, const gchar* sender, const gchar* object_path,
+                             const gchar* interface, const gchar* method,
+                             GVariant* params, GDBusMethodInvocation* invocation, gpointer user_data) {
+	(void)conn; (void)sender; (void)object_path; (void)params; (void)user_data;
 	if (strcmp(interface, "org.kde.StatusNotifierItem") == 0) {
 		if (strcmp(method, "Activate") == 0) {
-			g_dbus_method_invocation_return_value(invocation, NULL);
-			return TRUE;
+			tray_show_window();
+			g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+			return;
 		}
-		if (strcmp(method, "ContextMenu") == 0) {
-			g_dbus_method_invocation_return_value(invocation, NULL);
-			return TRUE;
+		if (strcmp(method, "SecondaryActivate") == 0 || strcmp(method, "ContextMenu") == 0 || strcmp(method, "Scroll") == 0) {
+			g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+			return;
 		}
 	}
 	if (strcmp(interface, "org.freedesktop.DBus.Properties") == 0) {
@@ -251,14 +258,14 @@ static gboolean tray_method_call(GDBusConnection* conn, const gchar* sender, con
 			const gchar* prop;
 			g_variant_get(params, "(&s&s)", &iface, &prop);
 			GError* error = NULL;
-			GVariant* value = tray_get_property(iface, prop, &error);
+			GVariant* value = tray_get_property(conn, sender, object_path, iface, prop, &error, user_data);
 			if (error) {
 				g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, error->message);
 				g_error_free(error);
 			} else {
 				g_dbus_method_invocation_return_value(invocation, g_variant_new_tuple(&value, 1));
 			}
-			return TRUE;
+			return;
 		}
 		if (strcmp(method, "GetAll") == 0) {
 			const gchar* iface;
@@ -266,10 +273,10 @@ static gboolean tray_method_call(GDBusConnection* conn, const gchar* sender, con
 			GVariantBuilder builder;
 			g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
 
-			const gchar* props[] = {"Id", "Title", "Status", "Category", "IconName", "IconPixmap", "OverlayIconName", "OverlayIconPixmap", "ToolTip", "Menu", NULL};
+			const gchar* props[] = {"Id", "Title", "Status", "Category", "IconName", "IconPixmap", "OverlayIconName", "OverlayIconPixmap", "ToolTip", NULL};
 			for (int i = 0; props[i]; i++) {
 				GError* error = NULL;
-				GVariant* value = tray_get_property(iface, props[i], &error);
+				GVariant* value = tray_get_property(conn, sender, object_path, iface, props[i], &error, user_data);
 				if (!error && value) {
 					g_variant_builder_add(&builder, "{sv}", props[i], value);
 				}
@@ -277,10 +284,10 @@ static gboolean tray_method_call(GDBusConnection* conn, const gchar* sender, con
 			}
 			GVariant* dict = g_variant_builder_end(&builder);
 			g_dbus_method_invocation_return_value(invocation, g_variant_new_tuple(&dict, 1));
-			return TRUE;
+			return;
 		}
 	}
-	return FALSE;
+	return;
 }
 
 static const GDBusInterfaceVTable tray_vtable = {
@@ -289,41 +296,19 @@ static const GDBusInterfaceVTable tray_vtable = {
 	.set_property = NULL,
 };
 
-static GVariant* tray_build_menu_items(void) {
-	// Items format: (id, parent_id, type, label, icon, tooltip, enabled)
-	// type: "standard", "check", "radio", "separator"
-	GVariantBuilder builder;
-	g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iisssis)"));
-
-	// Show Window
-	g_variant_builder_add(&builder, "(iisssis)", 1, 0, "standard", "Show Window", "window-new", "", TRUE);
-	// Separator
-	g_variant_builder_add(&builder, "(iisssis)", 2, 0, "separator", "", "", "", FALSE);
-	// Control Center
-	g_variant_builder_add(&builder, "(iisssis)", 3, 0, "standard", "Control Center & Settings", "preferences-system", "", TRUE);
-	// Separator
-	g_variant_builder_add(&builder, "(iisssis)", 4, 0, "separator", "", "", "", FALSE);
-	// Toggle Privacy Mode
-	g_variant_builder_add(&builder, "(iisssis)", 5, 0, "check", "Privacy Mode", "security-high", "Blur chats and media", FALSE);
-	// Toggle Always on Top
-	g_variant_builder_add(&builder, "(iisssis)", 6, 0, "check", "Always on Top", "window-pinned", "Keep window above others", FALSE);
-	// Toggle Mute Audio
-	g_variant_builder_add(&builder, "(iisssis)", 7, 0, "check", "Mute Audio", "audio-volume-muted", "Mute notifications", FALSE);
-	// Separator
-	g_variant_builder_add(&builder, "(iisssis)", 8, 0, "separator", "", "", "", FALSE);
-	// Open Downloads
-	g_variant_builder_add(&builder, "(iisssis)", 9, 0, "standard", "Open Downloads Folder", "folder", "", TRUE);
-	// Check Updates
-	g_variant_builder_add(&builder, "(iisssis)", 10, 0, "standard", "Check for Updates", "system-software-update", "", TRUE);
-	// Separator
-	g_variant_builder_add(&builder, "(iisssis)", 11, 0, "separator", "", "", "", FALSE);
-	// Quit
-	g_variant_builder_add(&builder, "(iisssis)", 12, 0, "standard", "Quit WhatsApp Desk", "application-exit", "", TRUE);
-
-	return g_variant_builder_end(&builder);
+static void tray_emit(const char* signal) {
+	if (!g_dbus_conn) return;
+	GError* error = NULL;
+	g_dbus_connection_emit_signal(g_dbus_conn, NULL,
+		TRAY_OBJ_PATH,
+		"org.kde.StatusNotifierItem",
+		signal,
+		NULL, &error);
+	if (error) g_error_free(error);
 }
 
 static void tray_update_overlay_icon(int count) {
+	g_unread_count = count > 0 ? count : 0;
 	if (count > 0) {
 		g_has_overlay = 1;
 		snprintf(g_overlay_icon_name, sizeof(g_overlay_icon_name), "whatsapp-desk-unread-%d", count);
@@ -331,16 +316,9 @@ static void tray_update_overlay_icon(int count) {
 		g_has_overlay = 0;
 		g_overlay_icon_name[0] = 0;
 	}
-	// Emit NewOverlayIcon signal
-	if (g_dbus_conn) {
-		GError* error = NULL;
-		g_dbus_connection_emit_signal(g_dbus_conn, NULL,
-			"/org/kde/StatusNotifierItem",
-			"org.kde.StatusNotifierItem",
-			"NewOverlayIcon",
-			NULL, &error);
-		if (error) g_error_free(error);
-	}
+	tray_emit("NewOverlayIcon");
+	tray_emit("NewToolTip");
+	tray_emit("NewTitle");
 }
 
 // Exported for Go
@@ -352,33 +330,33 @@ static void tray_on_bus_acquired(GDBusConnection* conn, const gchar* name, gpoin
 	g_dbus_conn = conn;
 	g_introspection = g_dbus_node_info_new_for_xml(tray_introspection_xml, NULL);
 
-	// Register StatusNotifierItem
+	// Register StatusNotifierItem object, then announce our bus name to
+	// the watcher. RegisterStatusNotifierItem takes a single service-name
+	// string (our owned bus name), NOT an (interface, path) tuple.
 	GError* error = NULL;
 	g_dbus_reg_id = g_dbus_connection_register_object(conn,
-		"/org/kde/StatusNotifierItem",
+		TRAY_OBJ_PATH,
 		g_introspection->interfaces[0],
 		&tray_vtable,
 		NULL, NULL, &error);
 	if (error) {
 		g_print("Failed to register StatusNotifierItem: %s\n", error->message);
 		g_error_free(error);
+		return;
 	}
 
-	// Register Menu
-	g_dbus_connection_register_object(conn,
-		"/org/kde/StatusNotifierItem/Menu",
-		g_introspection->interfaces[1],
-		&tray_vtable,
-		NULL, NULL, NULL);
-
-	// Register on StatusNotifierWatcher
-	GVariant* params = g_variant_new("(ss)", "org.kde.StatusNotifierItem", "/org/kde/StatusNotifierItem");
+	GVariant* params = g_variant_new("(s)", TRAY_BUS_NAME);
+	GError* callError = NULL;
 	g_dbus_connection_call_sync(conn,
 		"org.kde.StatusNotifierWatcher",
 		"/StatusNotifierWatcher",
 		"org.kde.StatusNotifierWatcher",
 		"RegisterStatusNotifierItem",
-		params, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+		params, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &callError);
+	if (callError) {
+		g_print("StatusNotifierWatcher register failed (no tray host?): %s\n", callError->message);
+		g_error_free(callError);
+	}
 
 	g_tray_visible = 1;
 }
@@ -401,7 +379,7 @@ static void tray_init(const char* icon_path) {
 	}
 
 	g_bus_own_name(G_BUS_TYPE_SESSION,
-		"org.kde.StatusNotifierItem-whatsapp-desk",
+		TRAY_BUS_NAME,
 		G_BUS_NAME_OWNER_FLAGS_NONE,
 		tray_on_bus_acquired,
 		NULL,
@@ -412,21 +390,14 @@ static void tray_init(const char* icon_path) {
 static void tray_update_icon(const char* icon_path) {
 	if (icon_path && icon_path[0] && g_dbus_conn && g_tray_visible) {
 		strncpy(g_tray_icon_path, icon_path, sizeof(g_tray_icon_path) - 1);
-		// Emit NewIcon signal
-		GError* error = NULL;
-		g_dbus_connection_emit_signal(g_dbus_conn, NULL,
-			"/org/kde/StatusNotifierItem",
-			"org.kde.StatusNotifierItem",
-			"NewIcon",
-			NULL, &error);
-		if (error) g_error_free(error);
+		tray_emit("NewIcon");
 	}
 }
 
 static void tray_shutdown(void) {
 	if (g_dbus_conn && g_tray_visible) {
-		// Unregister from watcher
-		GVariant* params = g_variant_new("(s)", "/org/kde/StatusNotifierItem");
+		// Unregister from watcher (single service-name string)
+		GVariant* params = g_variant_new("(s)", TRAY_BUS_NAME);
 		g_dbus_connection_call_sync(g_dbus_conn,
 			"org.kde.StatusNotifierWatcher",
 			"/StatusNotifierWatcher",

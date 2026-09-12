@@ -1748,8 +1748,8 @@ func getInitScript(ua string) string {
 			window.toggleSpellCheck = function(enabled) {
 				spellCheckEnabled = !!enabled;
 				enableSpellCheckOnTextareas();
-				if (window.setSpellCheckNative) {
-					window.setSpellCheckNative(spellCheckEnabled);
+				if (window.setSpellCheckEnabledNative) {
+					window.setSpellCheckEnabledNative(spellCheckEnabled);
 				}
 			};
 

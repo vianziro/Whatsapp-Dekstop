@@ -109,6 +109,7 @@ type ITaskbarList3Vtbl struct {
 	RegisterTab          uintptr
 	UnregisterTab        uintptr
 	SetTabOrder          uintptr
+	SetTabActivate       uintptr
 	SetTabProperties     uintptr
 }
 
