@@ -803,6 +803,12 @@ func runApp() {
 	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
 		return setBlurAvatars(on)
 	})
+	_ = w.Bind("getPendingCrashNative", func() string {
+		return pendingCrashReport()
+	})
+	_ = w.Bind("markCrashNotifiedNative", func() bool {
+		return markCrashNotified()
+	})
 
 	// Taskbar badge binding
 	_ = w.Bind("updateDockBadge", func(badge string) {

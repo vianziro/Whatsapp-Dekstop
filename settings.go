@@ -26,6 +26,9 @@ type AppSettings struct {
 	SpellCheckEnabled bool   `json:"spell_check_enabled"`
 	SpellCheckLang    string `json:"spell_check_lang"`
 	BlurAvatars       bool   `json:"blur_avatars"`
+	// LastCrashNotified is the unix time of the crash log last surfaced to
+	// the user via the issue reporter, so the startup nudge fires once.
+	LastCrashNotified int64 `json:"last_crash_notified"`
 }
 
 func getDefaultDownloadDir() string {

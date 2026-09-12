@@ -83,6 +83,8 @@ The portable archive requires GTK 3 and WebKitGTK 4.0 or 4.1.
 
 WhatsApp Desk loads `https://web.whatsapp.com` directly. Session and cache data remain inside the application's local profile. The application does not add an analytics service or a message relay server.
 
+Errors and crash logs stay on your machine. Nothing is ever uploaded automatically: the Control Center's Report button (or the post-crash nudge) only opens a pre-filled GitHub issue in your browser, which you review before submitting.
+
 Default profile locations:
 
 - macOS: `~/Library/Application Support/WhatsAppDesk/UserData/`

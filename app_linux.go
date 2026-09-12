@@ -824,6 +824,12 @@ func runApp() {
 	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
 		return setBlurAvatars(on)
 	})
+	_ = w.Bind("getPendingCrashNative", func() string {
+		return pendingCrashReport()
+	})
+	_ = w.Bind("markCrashNotifiedNative", func() bool {
+		return markCrashNotified()
+	})
 
 	w.Init(getInitScript(userAgentLinux))
 	w.Navigate(appURL)

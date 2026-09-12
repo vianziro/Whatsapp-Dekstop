@@ -1209,6 +1209,92 @@ func getInitScript(ua string) string {
 			}, action ? 6000 : 2500);
 		}
 
+		// Issue reporter: page errors are buffered locally (never uploaded),
+		// and the Control Center offers a one-click pre-filled GitHub issue.
+		// Nothing leaves the machine until the user presses Report — the
+		// browser then shows the composed issue for review before submitting.
+		(function() {
+			window.__waMeta = { ver: '__WA_APP_VERSION__', platform: '` + runtime.GOOS + `' };
+
+			var waErrBuf = [];
+			function waPushErr(kind, msg) {
+				msg = String(msg || 'unknown error').slice(0, 200);
+				var last = waErrBuf[waErrBuf.length - 1];
+				if (last && last.m === msg) { last.n++; return; }
+				waErrBuf.push({ k: kind, m: msg, n: 1 });
+				if (waErrBuf.length > 25) waErrBuf.shift();
+			}
+			window.addEventListener('error', function(e) {
+				var src = '';
+				try { src = String(e.filename || '').split('/').pop(); } catch (x) {}
+				waPushErr('error', (e.message || 'unknown') + ' @ ' + (src || '?') + ':' + (e.lineno || '?'));
+			}, true);
+			window.addEventListener('unhandledrejection', function(e) {
+				var r = e.reason;
+				waPushErr('unhandled', String((r && (r.stack || r.message)) || r).slice(0, 200));
+			});
+
+			function resolveMaybe(v) {
+				if (v && typeof v.then === 'function') return v;
+				return Promise.resolve(v);
+			}
+			window.openIssueReporter = function(crashTail) {
+				var meta = window.__waMeta || { ver: '?', platform: '?' };
+				var lines = ['WhatsApp Desk v' + meta.ver + ' (' + meta.platform + ')', ''];
+				if (waErrBuf.length) {
+					lines.push('Recent page errors:');
+					waErrBuf.slice(-8).forEach(function(e) {
+						lines.push('- [' + e.k + '] ' + e.m + (e.n > 1 ? ' (x' + e.n + ')' : ''));
+					});
+					lines.push('');
+				} else {
+					lines.push('No page errors captured.');
+					lines.push('');
+				}
+				if (crashTail) {
+					var fence = String.fromCharCode(96, 96, 96);
+					lines.push('Crash log tail:');
+					lines.push(fence);
+					lines.push(String(crashTail).slice(0, 1200));
+					lines.push(fence);
+				}
+				lines.push('_Submitted from the in-app reporter — please add steps to reproduce._');
+				var url = 'https://github.com/vianziro/Whatsapp-Dekstop/issues/new' +
+					'?title=' + encodeURIComponent('Report v' + meta.ver + ' (' + meta.platform + '): ') +
+					'&body=' + encodeURIComponent(lines.join('\n').slice(0, 2500)) +
+					'&labels=' + encodeURIComponent('bug');
+				if (window.openExternalLink) window.openExternalLink(url);
+				if (window.markCrashNotifiedNative) {
+					try { resolveMaybe(window.markCrashNotifiedNative()); } catch (e) {}
+				}
+			};
+			window.reportIssueNow = function() {
+				if (window.getPendingCrashNative) {
+					try {
+						resolveMaybe(window.getPendingCrashNative()).then(function(t) {
+							window.openIssueReporter(t || '');
+						});
+						return;
+					} catch (e) {}
+				}
+				window.openIssueReporter('');
+			};
+
+			// Startup nudge, once per crash: offer reporting instead of nagging.
+			setTimeout(function() {
+				if (!window.getPendingCrashNative || typeof showFloatingToast !== 'function') return;
+				try {
+					resolveMaybe(window.getPendingCrashNative()).then(function(tail) {
+						if (!tail) return;
+						showFloatingToast('⚠️ Previous session crashed — tap to report', {
+							label: 'Report',
+							onClick: function() { window.reportIssueNow(); }
+						});
+					});
+				} catch (e) {}
+			}, 10000);
+		})();
+
 		// Privacy Mode Toggle (Cmd + Shift + P)
 		(function() {
 			var isPrivacyActive = false;
@@ -1228,10 +1314,12 @@ func getInitScript(ua string) string {
 			// don't carry selectable-text, so they stay readable by design.
 			styleEl.textContent = [
 				// Layer 1: names + previews in the chat list, hover row to peek.
-				'.privacy-mode #pane-side [role="row"] span.selectable-text,',
-				'.privacy-mode [data-testid="chat-list"] [role="row"] span.selectable-text,',
-				'.privacy-mode #pane-side [role="row"] span[title],',
-				'.privacy-mode [data-testid="chat-list"] [role="row"] span[title]',
+				// Spans tagged data-wa-time by the timestamp tagger below are
+				// always spared, so clock times stay readable.
+				'.privacy-mode #pane-side [role="row"] span.selectable-text:not([data-wa-time]),',
+				'.privacy-mode [data-testid="chat-list"] [role="row"] span.selectable-text:not([data-wa-time]),',
+				'.privacy-mode #pane-side [role="row"] span[title]:not([data-wa-time]),',
+				'.privacy-mode [data-testid="chat-list"] [role="row"] span[title]:not([data-wa-time])',
 				'{ color: transparent !important; text-shadow: 0 0 10px rgba(0,0,0,.55) !important; }',
 				// Hovering a row restores every span beneath it, so restore can
 				// never disagree with blur even if WhatsApp rotates classes.
@@ -1245,7 +1333,7 @@ func getInitScript(ua string) string {
 				// hover-to-peek silently died). Hovering the bubble restores
 				// the whole subtree, so blur and restore can never disagree.
 				// The reply box lives outside msg-container and stays usable.
-				'.privacy-mode #main [data-testid="msg-container"] span',
+				'.privacy-mode #main [data-testid="msg-container"] span:not([data-wa-time])',
 				'{ color: transparent !important; text-shadow: 0 0 10px rgba(0,0,0,.55) !important; }',
 				'.privacy-mode #main [data-testid="msg-container"]:hover span',
 				'{ color: inherit !important; text-shadow: none !important; }',
@@ -1257,11 +1345,17 @@ func getInitScript(ua string) string {
 				'.privacy-mode #main [data-testid="msg-container"]:hover img,',
 				'.privacy-mode #main [data-testid="msg-container"]:hover video',
 				'{ filter: none !important; }',
-				// Layer 3: fullscreen media viewer stays fully hidden while
+				// Layer 3: conversation header name redacted as a solid bar (like
+				// a marker pen), hover the header to reveal. Timestamps spared.
+				'.privacy-mode #main header span:not([data-wa-time])',
+				'{ color: transparent !important; text-shadow: none !important; background: #000 !important; border-radius: 4px; }',
+				'.privacy-mode #main header:hover span:not([data-wa-time])',
+				'{ color: inherit !important; text-shadow: none !important; background: transparent !important; }',
+				// Layer 4: fullscreen media viewer stays fully hidden while
 				// privacy is on (one layer, no hover needed there).
 				'.privacy-mode [data-testid="media-viewer"]',
 				'{ filter: blur(12px) !important; }',
-				// Layer 4: profile photos, only when the "blur avatars" setting
+				// Layer 5: profile photos, only when the "blur avatars" setting
 				// is on (html.blur-avatars). Hovering the row/message reveals.
 				'.privacy-mode.blur-avatars #pane-side [role="row"] img,',
 				'.privacy-mode.blur-avatars #side header img,',
@@ -1315,6 +1409,35 @@ func getInitScript(ua string) string {
 			window.isBlurAvatars = function() {
 				return document.documentElement.classList.contains('blur-avatars');
 			};
+
+			// Timestamp sparing: tag short clock/day strings so the CSS above
+			// can exclude them via :not([data-wa-time]). textContent never
+			// forces layout; each span is visited once (__waTimeSeen); the
+			// :not() selector keeps repeat runs cheap. Ticks at most every 3s,
+			// only while privacy is on and the page is visible, so the steady
+			// state cost is ~zero. Attribute writes don't trip the childList
+			// observers, so this can't feed an observer loop.
+			var WA_TIME_RE = /^(\d{1,2}:\d{2}(\s?(AM|PM))?|Today|Yesterday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Hari ini|Kemarin|Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)$/i;
+			function tagTimesIn(root) {
+				if (!root || !root.querySelectorAll) return;
+				var spans = root.querySelectorAll('span:not([data-wa-time])');
+				var n = 0;
+				for (var i = 0; i < spans.length && n < 250; i++) {
+					var s = spans[i];
+					if (s.__waTimeSeen) continue;
+					s.__waTimeSeen = true;
+					n++;
+					try {
+						var t = (s.textContent || '').trim();
+						if (WA_TIME_RE.test(t)) s.setAttribute('data-wa-time', '1');
+					} catch (e) {}
+				}
+			}
+			setInterval(function() {
+				if (!isPrivacyActive || shouldPauseBackgroundWork()) return;
+				tagTimesIn(document.getElementById('main'));
+				tagTimesIn(document.getElementById('pane-side'));
+			}, 3000);
 			window.setBlurAvatars = function(on) {
 				on = !!on;
 				if (on) document.documentElement.classList.add('blur-avatars');
@@ -2610,7 +2733,7 @@ func getInitScript(ua string) string {
 					'      <strong class="wa-text-primary" style="font-size:12.5px;">Privacy Mode</strong>' +
 					'      <span id="wa-badge-priv" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
 					'    </div>' +
-					'    <div class="wa-text-muted" style="font-size:11px;">Hide names, previews & message text until you turn this off. Hover to peek; reply box stays usable.</div>' +
+					'    <div class="wa-text-muted" style="font-size:11px;">Hide names, previews & message text until you turn this off. Hover to peek; timestamps stay visible; reply box stays usable.</div>' +
 					'  </div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'    <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
@@ -2731,11 +2854,24 @@ func getInitScript(ua string) string {
 				var footer = document.createElement('div');
 				footer.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:2px;';
 				footer.innerHTML = '<span class="wa-text-muted" style="font-size:10.5px;">Press <kbd style="padding:1px 3px;border-radius:3px;font-family:monospace;">Esc</kbd> to close</span>';
+				var footLeft = document.createElement('div');
+				footLeft.style.cssText = 'display:flex;align-items:center;gap:8px;';
+				var btnReport = document.createElement('button');
+				btnReport.textContent = '🐞 Report issue';
+				btnReport.id = 'wa-btn-report';
+				btnReport.title = 'Open a pre-filled GitHub issue with recent errors (nothing is sent automatically)';
+				btnReport.style.cssText = 'background:transparent;border:none;color:#8696a0;font-size:11px;cursor:pointer;padding:5px 8px;';
+				btnReport.onclick = function() {
+					closeSettings();
+					if (window.reportIssueNow) window.reportIssueNow();
+				};
 				var btnDone = document.createElement('button');
 				btnDone.textContent = 'Done';
 				btnDone.id = 'wa-btn-done';
 				btnDone.style.cssText = 'padding:5px 16px;border-radius:6px;font-size:11.5px;font-weight:600;cursor:pointer;border-width:1px;border-style:solid;';
-				footer.appendChild(btnDone);
+				footLeft.appendChild(btnReport);
+				footLeft.appendChild(btnDone);
+				footer.appendChild(footLeft);
 				modal.appendChild(footer);
 
 				overlay.appendChild(modal);
