@@ -1233,21 +1233,30 @@ func getInitScript(ua string) string {
 				'.privacy-mode #pane-side [role="row"] span[title],',
 				'.privacy-mode [data-testid="chat-list"] [role="row"] span[title]',
 				'{ color: transparent !important; text-shadow: 0 0 10px rgba(0,0,0,.55) !important; }',
-				'.privacy-mode #pane-side [role="row"]:hover span.selectable-text,',
-				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span.selectable-text,',
-				'.privacy-mode #pane-side [role="row"]:hover span[title],',
-				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span[title]',
+				// Hovering a row restores every span beneath it, so restore can
+				// never disagree with blur even if WhatsApp rotates classes.
+				'.privacy-mode #pane-side [role="row"]:hover span,',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span',
 				'{ color: inherit !important; text-shadow: none !important; }',
-				// Layer 2: message text in the open conversation, hover bubble
-				// to peek. The input box is never touched, so replies work.
-				'.privacy-mode #main span.selectable-text,',
-				'.privacy-mode [data-testid="conversation-panel"] span.selectable-text',
+				// Layer 2: everything textual inside a message bubble, keyed ONLY
+				// on the long-stable [data-testid="msg-container"] hook — never
+				// on hashed cosmetic classes (those rotate; .message-in and
+				// span.selectable-text no longer exist, which is exactly why
+				// hover-to-peek silently died). Hovering the bubble restores
+				// the whole subtree, so blur and restore can never disagree.
+				// The reply box lives outside msg-container and stays usable.
+				'.privacy-mode #main [data-testid="msg-container"] span',
 				'{ color: transparent !important; text-shadow: 0 0 10px rgba(0,0,0,.55) !important; }',
-				'.privacy-mode #main .message-in:hover span.selectable-text,',
-				'.privacy-mode #main .message-out:hover span.selectable-text,',
-				'.privacy-mode [data-testid="conversation-panel"] .message-in:hover span.selectable-text,',
-				'.privacy-mode [data-testid="conversation-panel"] .message-out:hover span.selectable-text',
+				'.privacy-mode #main [data-testid="msg-container"]:hover span',
 				'{ color: inherit !important; text-shadow: none !important; }',
+				// In-chat photos/videos hide the same way (filter is the only
+				// tool for replaced elements); hover restores symmetrically.
+				'.privacy-mode #main [data-testid="msg-container"] img,',
+				'.privacy-mode #main [data-testid="msg-container"] video',
+				'{ filter: blur(12px) !important; }',
+				'.privacy-mode #main [data-testid="msg-container"]:hover img,',
+				'.privacy-mode #main [data-testid="msg-container"]:hover video',
+				'{ filter: none !important; }',
 				// Layer 3: fullscreen media viewer stays fully hidden while
 				// privacy is on (one layer, no hover needed there).
 				'.privacy-mode [data-testid="media-viewer"]',
