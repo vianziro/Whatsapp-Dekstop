@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Unified build dispatcher for WhatsApp Desk.
-# Usage: ./build.sh [mac|linux|windows|all] [version]
+# Usage: ./build.sh [mac|linux|windows|all|check] [version]
 # Delegates to the per-OS scripts so packaging logic stays in one place each.
+# "check" compiles + vets all three OS targets without packaging anything,
+# so Windows/Linux-only breakage is caught on this machine (no CI needed).
 set -e
 
 VERSION="${2:-1.5.9}"  # single source of truth, injected via -X main.appVersion
@@ -36,10 +38,56 @@ build_windows() {
     echo "Created: WhatsAppDesk.exe and WhatsApp-Desk-Windows-x64.zip"
 }
 
+check_all() {
+    echo "=== gofmt (excluding vendor) ==="
+    UNFMT=$(gofmt -l . 2>/dev/null | grep -v "^vendor/" || true)
+    if [ -n "${UNFMT}" ]; then
+        echo "Unformatted files:"; echo "${UNFMT}"
+        return 1
+    fi
+    echo "gofmt clean."
+
+    echo "=== macOS compile ==="
+    GOTOOLCHAIN=local go build -o /dev/null . || return 1
+
+    echo "=== Windows cross-compile + vet ==="
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null . || return 1
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet . || return 1
+
+    echo "=== Linux compile + vet (docker) ==="
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "docker not found, skipping linux check."
+        return 0
+    fi
+    BUILDER_CTX="${HOME}/.cache/wadesk-builder"
+    mkdir -p "${BUILDER_CTX}"
+    if [ ! -f "${BUILDER_CTX}/Dockerfile" ]; then
+        cat > "${BUILDER_CTX}/Dockerfile" <<'DOCKER_EOF'
+FROM golang:1.26-bookworm
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libgtk-3-dev libwebkit2gtk-4.0-dev dpkg-dev zip \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+DOCKER_EOF
+    fi
+    if ! docker image inspect wadesk-linux-builder >/dev/null 2>&1; then
+        echo "Building local builder image (one-time, cached afterwards)..."
+        docker build --platform linux/amd64 -t wadesk-linux-builder "${BUILDER_CTX}" || return 1
+    fi
+    docker run --platform linux/amd64 --rm \
+        -v "$PWD":/src -w /src \
+        -v wadesk-gocache:/tmp/gocache -e GOCACHE=/tmp/gocache \
+        wadesk-linux-builder \
+        bash -c "go build -o /tmp/wa-check . && go vet ." || return 1
+
+    echo "All checks passed."
+}
+
 case "${TARGET}" in
     mac)      build_mac ;;
     linux)    build_linux ;;
     windows)  build_windows ;;
+    check)    check_all ;;
     all)
         case "$(uname -s)" in
             Darwin) build_mac ;;
@@ -48,7 +96,7 @@ case "${TARGET}" in
             *) echo "Unknown host $(uname -s); run with an explicit target."; exit 1 ;;
         esac
         ;;
-    *) echo "Usage: $0 [mac|linux|windows|all] [version]"; exit 1 ;;
+    *) echo "Usage: $0 [mac|linux|windows|all|check] [version]"; exit 1 ;;
 esac
 
 echo "Done! (version ${VERSION})"
