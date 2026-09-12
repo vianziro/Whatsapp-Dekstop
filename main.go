@@ -788,17 +788,29 @@ func getInitScript(ua string) string {
 			// Lazy-load SheetJS (xlsx.core.min.js) only when spreadsheet preview is first needed.
 			var xlsxLoadPromise = null;
 			function ensureXLSXLoaded() {
-				if (window.XLSX) return Promise.resolve();
+				// Only a library that exposes XLSX.utils is usable; an empty stub would
+				// make every later XLSX.utils call throw, so treat that as "not loaded".
+				if (window.XLSX && window.XLSX.utils) return Promise.resolve();
 				if (xlsxLoadPromise) return xlsxLoadPromise;
 				xlsxLoadPromise = new Promise(function(resolve, reject) {
 					// Fetch the bundled SheetJS from the native side
 					if (window.loadXLSXLibraryNative) {
 						window.loadXLSXLibraryNative().then(function(jsCode) {
 							try {
-								eval(jsCode);
-								resolve();
+								  eval(jsCode);
+								  // If the host page happens to expose CommonJS exports/module,
+								  // the SheetJS core build initialises that object instead of a global
+								  // and leaves window.XLSX as an empty stub. The direct eval above also
+								  // created an eval-scoped XLSX binding, so prefer it in that case.
+								  if (typeof XLSX !== 'undefined' && (!window.XLSX || !window.XLSX.utils)) {
+								      window.XLSX = XLSX;
+								  }
+								  if (!window.XLSX || !window.XLSX.utils) {
+								      throw new Error('spreadsheet library failed to initialise');
+								  }
+								  resolve();
 							} catch (e) {
-								reject(e);
+								  reject(e);
 							}
 						}).catch(reject);
 					} else {
@@ -1825,35 +1837,66 @@ func getInitScript(ua string) string {
 			var spellCheckEnabled = true;
 			var spellCheckLang = 'auto';
 
-			function enableSpellCheckOnTextareas() {
-				var textareas = document.querySelectorAll('textarea[contenteditable="true"], div[contenteditable="true"][role="textbox"], textarea');
-				textareas.forEach(function(el) {
-					if (!el.dataset.spellCheckInitialized) {
-						el.dataset.spellCheckInitialized = 'true';
-						el.spellcheck = spellCheckEnabled;
-						if (spellCheckLang !== 'auto') {
-							el.lang = spellCheckLang;
-						}
-					}
-				});
+			function applySpellCheck(el) {
+				if (!el || el.nodeType !== 1 || el.dataset.spellCheckInitialized) return;
+				el.dataset.spellCheckInitialized = 'true';
+				el.spellcheck = spellCheckEnabled;
+				if (spellCheckLang !== 'auto') {
+					el.lang = spellCheckLang;
+				}
+			}
+
+			function enableSpellCheckOnTextareas(scope) {
+				var selector = 'textarea[contenteditable="true"], div[contenteditable="true"][role="textbox"], textarea';
+				var root = (scope && scope.querySelectorAll) ? scope : document;
+				try {
+					if (scope && scope.matches && scope.matches(selector)) applySpellCheck(scope);
+					var textareas = root.querySelectorAll(selector);
+					for (var i = 0; i < textareas.length; i++) applySpellCheck(textareas[i]);
+				} catch (e) {}
 			}
 
 			function initSpellCheck() {
 				// Initial enable
 				enableSpellCheckOnTextareas();
 
-				// Watch for new textareas (WhatsApp Web is SPA)
+				// Watch for new textareas (WhatsApp Web is SPA). The chat list is
+				// virtualized, so scrolling continuously adds and removes rows. The old
+				// version ran a document-wide querySelectorAll for every single added
+				// node, which is what made long chat-list scrolls stutter. Coalesce to
+				// one pass per animation frame and only for subtrees that can hold
+				// editable text.
+				var spellCheckScheduled = false;
+				var pendingSpellRoots = [];
+				function spellCheckRelevant(node) {
+					if (!node || node.nodeType !== 1) return false;
+					try {
+						return !!(node.matches && node.matches('[contenteditable="true"], textarea')) ||
+							!!(node.querySelector && node.querySelector('[contenteditable="true"], textarea'));
+					} catch (e) {
+						return false;
+					}
+				}
+				function runSpellCheckScan() {
+					spellCheckScheduled = false;
+					var roots = pendingSpellRoots.splice(0, pendingSpellRoots.length);
+					if (shouldPauseBackgroundWork()) return;
+					for (var r = 0; r < roots.length; r++) enableSpellCheckOnTextareas(roots[r]);
+				}
+				function scheduleSpellCheck() {
+					if (spellCheckScheduled || pendingSpellRoots.length === 0) return;
+					spellCheckScheduled = true;
+					requestAnimationFrame(runSpellCheckScan);
+				}
 				var observer = new MutationObserver(function(mutations) {
-					var shouldCheck = false;
+					if (shouldPauseBackgroundWork()) return;
 					for (var i = 0; i < mutations.length; i++) {
-						if (mutations[i].addedNodes.length > 0) {
-							shouldCheck = true;
-							break;
+						var added = mutations[i].addedNodes;
+						for (var j = 0; j < added.length; j++) {
+							if (spellCheckRelevant(added[j])) pendingSpellRoots.push(added[j]);
 						}
 					}
-					if (shouldCheck) {
-						setTimeout(enableSpellCheckOnTextareas, 100);
-					}
+					scheduleSpellCheck();
 				});
 				observer.observe(document.body, { childList: true, subtree: true });
 
@@ -3172,8 +3215,5 @@ func main() {
 			writeCrashReport("main", r)
 		}
 	}()
-	if !validateBuildEnvironment() {
-		return
-	}
 	runApp()
 }

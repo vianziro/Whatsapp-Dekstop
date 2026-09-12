@@ -3,8 +3,20 @@ set -e
 
 APP_NAME="whatsapp-desk"
 DISPLAY_NAME="WhatsApp Desk"
-VERSION="${1:-1.5.9}"
+VERSION="${1:-${WA_DESK_VERSION:-1.5.9.1}}"
 OUTPUT_DIR="dist_linux"
+
+# Derive the target architecture from the Go toolchain instead of hardcoding it.
+# Hardcoding amd64 silently mislabelled arm64 builds: the .deb control file and
+# the artifact names claimed amd64 while the binary inside was aarch64.
+GOARCH_VALUE="$(go env GOARCH 2>/dev/null || true)"
+case "${GOARCH_VALUE}" in
+    amd64) DEB_ARCH="amd64"; BUNDLE_ARCH="x64" ;;
+    arm64) DEB_ARCH="arm64"; BUNDLE_ARCH="arm64" ;;
+    "")    DEB_ARCH="amd64"; BUNDLE_ARCH="x64" ;;
+    *)     DEB_ARCH="${GOARCH_VALUE}"; BUNDLE_ARCH="${GOARCH_VALUE}" ;;
+esac
+echo "Target architecture: ${GOARCH_VALUE:-unknown} (deb: ${DEB_ARCH}, bundle: ${BUNDLE_ARCH})"
 
 echo "=== Building ${DISPLAY_NAME} for Linux ==="
 
@@ -42,8 +54,8 @@ Keywords=WhatsApp;Chat;Messenger;
 EOF
 
 # Create tar.gz release bundle
-echo "Creating release tarball (WhatsApp-Desk-Linux-x64.tar.gz)..."
-TAR_BUNDLE="WhatsApp-Desk-Linux-x64.tar.gz"
+echo "Creating release tarball (WhatsApp-Desk-Linux-${BUNDLE_ARCH}.tar.gz)..."
+TAR_BUNDLE="WhatsApp-Desk-Linux-${BUNDLE_ARCH}.tar.gz"
 rm -f "${TAR_BUNDLE}"
 tar -czf "${TAR_BUNDLE}" -C "${OUTPUT_DIR}" .
 
@@ -69,7 +81,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
     cat << EOF > "${DEB_DIR}/DEBIAN/control"
 Package: ${APP_NAME}
 Version: ${VERSION}
-Architecture: amd64
+Architecture: ${DEB_ARCH}
 Maintainer: Community <contact@github.com>
 Installed-Size: 15000
 Depends: libgtk-3-0, libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0
@@ -80,10 +92,10 @@ Description: Lightweight WhatsApp Desktop Client
  built with Go and native WebKit.
 EOF
 
-    dpkg-deb --build "${DEB_DIR}" "whatsapp-desk_${VERSION}_amd64.deb"
-    cp "whatsapp-desk_${VERSION}_amd64.deb" "WhatsApp-Desk-Linux-amd64.deb"
+    dpkg-deb --build "${DEB_DIR}" "whatsapp-desk_${VERSION}_${DEB_ARCH}.deb"
+    cp "whatsapp-desk_${VERSION}_${DEB_ARCH}.deb" "WhatsApp-Desk-Linux-${DEB_ARCH}.deb"
     rm -rf "${DEB_DIR}"
-    echo "Created: whatsapp-desk_${VERSION}_amd64.deb and WhatsApp-Desk-Linux-amd64.deb"
+    echo "Created: whatsapp-desk_${VERSION}_${DEB_ARCH}.deb and WhatsApp-Desk-Linux-${DEB_ARCH}.deb"
 fi
 
 echo "Done! Linux artifacts ready in ${OUTPUT_DIR} and ${TAR_BUNDLE}."

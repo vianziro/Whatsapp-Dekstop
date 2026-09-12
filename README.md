@@ -20,15 +20,16 @@ The screenshots use blurred chat content to protect personal information.
 
 ## Download
 
-Current release: **v1.5.9**
+Latest published release: **v1.5.9**
 
 | Platform | Download |
 | --- | --- |
 | macOS, Apple Silicon and Intel | [DMG](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.dmg) · [ZIP](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.zip) |
 | Windows 10/11 x64 | [EXE](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe) · [ZIP](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Windows-x64.zip) |
 | Debian/Ubuntu x64 | [DEB](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-amd64.deb) · [tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
-| Debian/Ubuntu arm64 | [DEB](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-arm64.deb) · [tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-arm64.tar.gz) |
-| Fedora/RHEL x64 | [RPM](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.rpm) |
+| Fedora/RHEL x64 | Use the [portable tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
+
+Linux arm64 packages will be published starting with v1.5.9.1. The updater only offers an architecture-compatible package; it never substitutes an x64 build on arm64.
 
 ## Main features
 
@@ -90,6 +91,12 @@ Default profile locations:
 - macOS: `~/Library/Application Support/WhatsAppDesk/UserData/`
 - Windows: `%APPDATA%\WhatsAppDesk\UserData\`
 - Linux: `~/.config/whatsapp-desk/`
+
+## Unreleased: 1.5.9.1
+
+- Linux update selection now distinguishes x64 and arm64, preventing an incompatible x64 download on arm64 devices.
+- Release automation builds and publishes macOS, Windows x64, Linux x64, and Linux arm64 from the tagged source version.
+- Removed the repository-tracked pseudo-secret build gate; it did not provide runtime security and could make a clean build fail unexpectedly.
 
 ## Version 1.5.9
 

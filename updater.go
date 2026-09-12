@@ -23,10 +23,10 @@ type UIController interface {
 }
 
 // appVersion is the single source of truth for the app version. Release
-// builds override it with -ldflags "-X main.appVersion=X.Y.Z"; the literal
+// builds override it with -ldflags "-X main.appVersion=X.Y.Z[.N]"; the literal
 // here is only the development fallback. UI strings must never hardcode a
 // version — they use the __WA_APP_VERSION__ placeholder replaced at runtime.
-var appVersion = "1.5.9"
+var appVersion = "1.5.9.1"
 
 const githubRepo = "vianziro/Whatsapp-Dekstop"
 
@@ -80,7 +80,17 @@ func parseVersionParts(v string) []int {
 func isNewerVersion(current, latest string) bool {
 	c := parseVersionParts(current)
 	l := parseVersionParts(latest)
-	for i := 0; i < 3; i++ {
+	maxParts := len(c)
+	if len(l) > maxParts {
+		maxParts = len(l)
+	}
+	for len(c) < maxParts {
+		c = append(c, 0)
+	}
+	for len(l) < maxParts {
+		l = append(l, 0)
+	}
+	for i := 0; i < maxParts; i++ {
 		if l[i] > c[i] {
 			return true
 		}
@@ -92,10 +102,17 @@ func isNewerVersion(current, latest string) bool {
 }
 
 func findAssetForCurrentOS(release *GitHubRelease) *GitHubAsset {
-	return findAssetForOS(release, runtime.GOOS)
+	return findAssetForPlatform(release, runtime.GOOS, runtime.GOARCH)
 }
 
+// findAssetForOS is retained for platform-agnostic callers and tests. Linux
+// amd64 is the historical default; production calls use
+// findAssetForCurrentOS so they also include GOARCH.
 func findAssetForOS(release *GitHubRelease, goos string) *GitHubAsset {
+	return findAssetForPlatform(release, goos, "amd64")
+}
+
+func findAssetForPlatform(release *GitHubRelease, goos, goarch string) *GitHubAsset {
 	if goos == "darwin" {
 		for _, preferred := range []string{"WhatsApp-Desk-macOS-Universal.zip", "WhatsApp-macOS-Universal.zip"} {
 			for i := range release.Assets {
@@ -122,19 +139,25 @@ func findAssetForOS(release *GitHubRelease, goos string) *GitHubAsset {
 			}
 		}
 	} else if goos == "linux" {
-		for _, preferred := range []string{"WhatsApp-Desk-Linux-x64.tar.gz", "WhatsApp-Linux-x64.tar.gz"} {
+		// A Linux arm64 process must never receive an x64 binary. Returning no
+		// asset is deliberate: the UI can explain that the release is incomplete
+		// instead of downloading an executable that cannot start.
+		bundleArch := "x64"
+		if goarch == "arm64" || goarch == "aarch64" {
+			bundleArch = "arm64"
+		}
+		for _, preferred := range []string{
+			"WhatsApp-Desk-Linux-" + bundleArch + ".tar.gz",
+			"WhatsApp-Linux-" + bundleArch + ".tar.gz",
+		} {
 			for i := range release.Assets {
 				if strings.EqualFold(release.Assets[i].Name, preferred) {
 					return &release.Assets[i]
 				}
 			}
 		}
-		for _, a := range release.Assets {
-			name := strings.ToLower(a.Name)
-			if strings.Contains(name, "linux") && (strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz")) {
-				return &a
-			}
-		}
+		// Do not use a broad Linux archive fallback here. It previously selected
+		// x64 on arm64 machines merely because it was the only archive present.
 	}
 	return nil
 }
@@ -163,16 +186,23 @@ func updateDownloadExtension(downloadURL string) string {
 // returns an HTTP 302 whose Location header names the newest release asset,
 // which is all the version check needs — no REST API call, so the 60-requests-
 // per-hour anonymous GitHub API limit can never blind the updater again.
-func updateAssetForOS(goos string) string {
+func updateAssetForPlatform(goos, goarch string) string {
 	switch goos {
 	case "darwin":
 		return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-macOS-Universal.zip"
 	case "windows":
 		return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsAppDesk.exe"
 	case "linux":
+		if goarch == "arm64" || goarch == "aarch64" {
+			return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-Linux-arm64.tar.gz"
+		}
 		return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz"
 	}
 	return ""
+}
+
+func updateAssetForOS(goos string) string {
+	return updateAssetForPlatform(goos, "amd64")
 }
 
 // versionFromAssetName extracts the version embedded in a release asset name,
@@ -195,7 +225,7 @@ func checkForUpdate(currentVer string) (*UpdateInfo, error) {
 			time.Since(start).Round(time.Millisecond), currentVer, latestVer)
 		info.LatestVersion = latestVer
 		if isNewerVersion(currentVer, latestVer) {
-			assetURL := updateAssetForOS(runtime.GOOS)
+			assetURL := updateAssetForPlatform(runtime.GOOS, runtime.GOARCH)
 			if assetURL == "" {
 				return info, fmt.Errorf("no compatible %s update asset configured", runtime.GOOS)
 			}

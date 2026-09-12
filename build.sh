@@ -6,7 +6,7 @@
 # so Windows/Linux-only breakage is caught on this machine (no CI needed).
 set -e
 
-VERSION="${2:-1.5.9}"  # single source of truth, injected via -X main.appVersion
+VERSION="${2:-1.5.9.1}"  # single source of truth, injected via -X main.appVersion
 TARGET="${1:-all}"
 
 export WA_DESK_VERSION="${VERSION}"

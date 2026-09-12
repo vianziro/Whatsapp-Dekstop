@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDarwinUpdaterSelectsOnlyMacArchive(t *testing.T) {
 	release := &GitHubRelease{Assets: []GitHubAsset{
@@ -35,6 +38,27 @@ func TestLinuxUpdaterSelectsPortableArchive(t *testing.T) {
 	}
 	if got := updateDownloadExtension(asset.BrowserDownloadURL); got != ".tar.gz" {
 		t.Fatalf("download extension = %q, want .tar.gz", got)
+	}
+}
+
+func TestLinuxArm64UpdaterNeverFallsBackToX64(t *testing.T) {
+	release := &GitHubRelease{Assets: []GitHubAsset{
+		{Name: "WhatsApp-Desk-Linux-x64.tar.gz", BrowserDownloadURL: "https://example.test/x64.tar.gz"},
+		{Name: "WhatsApp-Desk-Linux-arm64.tar.gz", BrowserDownloadURL: "https://example.test/arm64.tar.gz"},
+	}}
+	asset := findAssetForPlatform(release, "linux", "arm64")
+	if asset == nil || asset.Name != "WhatsApp-Desk-Linux-arm64.tar.gz" {
+		t.Fatalf("Linux arm64 updater must select arm64 archive, got %#v", asset)
+	}
+
+	missing := &GitHubRelease{Assets: []GitHubAsset{
+		{Name: "WhatsApp-Desk-Linux-x64.tar.gz", BrowserDownloadURL: "https://example.test/x64.tar.gz"},
+	}}
+	if asset := findAssetForPlatform(missing, "linux", "arm64"); asset != nil {
+		t.Fatalf("Linux arm64 updater must not download x64 fallback, got %#v", asset)
+	}
+	if got := updateAssetForPlatform("linux", "arm64"); !strings.HasSuffix(got, "Linux-arm64.tar.gz") {
+		t.Fatalf("Linux arm64 stable asset URL = %q", got)
 	}
 }
 
@@ -82,6 +106,9 @@ func TestIsNewerVersion(t *testing.T) {
 		{"1.5.0", "v1.5.1", true},
 		{"1.5.1", "v1.5.2", true},
 		{"1.5.2", "v1.5.3", true},
+		{"1.5.9", "1.5.9.1", true},
+		{"1.5.9.1", "1.5.9", false},
+		{"1.5.9.1", "1.5.9.1", false},
 		{"1.5.3", "1.5.3", false},
 		{"1.5.2", "1.5.2", false},
 		{"1.5.2", "1.5.1", false},

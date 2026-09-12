@@ -10,30 +10,16 @@ icon_1024.png
 *.zip
 *.tmp
 *.log
-.github/
-config_private.go
-build_mac.sh
-build_linux.sh
 dmg_background.png
 whatsapp-desktop
 
-# Core proprietary implementation files
-app_darwin.go
-app_windows.go
-app_linux.go
-updater.go
-updater_darwin.go
-updater_linux.go
-updater_windows.go
-settings.go
-settings_darwin.go
-settings_linux.go
-settings_windows.go
-onboarding.go
-
-# Unit and regression tests
-*_test.go
-main_test.go
+# Generated build output and local tooling state
+*.rpm
+*.deb
+dist_linux*/
+rpms*/
+.gocache/
+.video_agent/
 
 # Internal project documentation & state
 MEMORY.md

@@ -105,21 +105,19 @@ static long long whatsappDeskDiskCacheBytesSync(void) {
 
 static void purgeWebKitMemory(void) {
     @autoreleasepool {
-        // Reclaim memory by purging WebKit's in-memory resource cache.
-        // Also purge disk cache (NSURLCache) on minimize to keep disk usage bounded.
-        // This intentionally excludes cookies/localStorage/IndexedDB, so the
-        // logged-in session is never affected.
+        // Reclaim RAM by purging WebKit's in-memory resource cache only.
+        // The on-disk HTTP cache is deliberately kept: it lives on disk, so wiping
+        // it frees no meaningful RAM, but it forces WhatsApp Web to re-download its
+        // bundles on the next use -- extra CPU and network traffic, plus a slow
+        // first paint and chat-list scroll. Disk growth is bounded separately by
+        // enforceDiskCacheCap() below. This intentionally excludes
+        // cookies/localStorage/IndexedDB, so the logged-in session is never affected.
         if (g_mainWebView) {
-            // Purge in-memory cache
             NSSet* memoryCacheTypes = [NSSet setWithObject:WKWebsiteDataTypeMemoryCache];
             WKWebsiteDataStore* store = g_mainWebView.configuration.websiteDataStore;
             [store removeDataOfTypes:memoryCacheTypes modifiedSince:[NSDate distantPast] completionHandler:^{}];
-
-            // Purge disk cache (NSURLCache) - only HTTP cache, not session data
-            NSSet* diskCacheTypes = [NSSet setWithObject:WKWebsiteDataTypeDiskCache];
-            [store removeDataOfTypes:diskCacheTypes modifiedSince:[NSDate distantPast] completionHandler:^{}];
         }
-        // Also enforce our custom disk cache cap (~/Library/Caches/com.whatsapp.desk + ~/Library/WebKit/...)
+        // Keep the on-disk cache under budget without discarding what is still useful.
         enforceDiskCacheCap();
     }
 }

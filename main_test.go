@@ -104,8 +104,49 @@ func TestSpreadsheetPreviewSupportsLegacyXLS(t *testing.T) {
 	if strings.Contains(script, "parseXlsxToHtml") || strings.Contains(script, "parseCsvToHtml") {
 		t.Errorf("legacy hand-rolled spreadsheet parser should have been removed in favor of the bundled XLSX library")
 	}
-	if !strings.Contains(script, "XLSX.version") && !strings.Contains(script, "make_xlsx_lib") {
-		t.Errorf("bundled SheetJS library does not appear to be embedded in the init script")
+
+	// SheetJS is no longer inlined into the page script (that would force the page to
+	// parse ~430 KB on every load, even when no spreadsheet is ever opened). It is
+	// embedded in the binary and pulled in on demand through the native bridge, so the
+	// script must reference the lazy loader and its consumers.
+	for _, want := range []string{
+		"function ensureXLSXLoaded()",
+		"loadXLSXLibraryNative",
+		"XLSX.read(rawXlsxB64",
+		"XLSX.utils.sheet_to_html",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("spreadsheet preview script is missing %q", want)
+		}
+	}
+
+	// xlsxLibJS is exactly what the native binding hands to the page, so the embedded
+	// asset must be a real, complete SheetJS core build, not an empty placeholder.
+	if len(xlsxLibJS) < 100000 {
+		t.Fatalf("embedded SheetJS asset looks truncated (%d bytes)", len(xlsxLibJS))
+	}
+	for _, want := range []string{"make_xlsx_lib", "sheet_to_html"} {
+		if !strings.Contains(xlsxLibJS, want) {
+			t.Errorf("embedded SheetJS asset is missing %q", want)
+		}
+	}
+}
+
+// Every platform must expose the lazy SheetJS bridge; a missing binding would
+// silently disable spreadsheet preview on that OS alone.
+func TestAllPlatformsExposeXLSXBridge(t *testing.T) {
+	for _, file := range []string{"app_darwin.go", "app_windows.go", "app_linux.go"} {
+		source, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(source)
+		if !strings.Contains(content, `Bind("loadXLSXLibraryNative"`) {
+			t.Errorf("%s does not bind loadXLSXLibraryNative", file)
+		}
+		if !strings.Contains(content, "return xlsxLibJS") {
+			t.Errorf("%s does not return the embedded SheetJS library", file)
+		}
 	}
 }
 
