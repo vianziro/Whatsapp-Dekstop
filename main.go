@@ -1214,41 +1214,44 @@ func getInitScript(ua string) string {
 			var isPrivacyActive = false;
 			var styleEl = document.createElement('style');
 			styleEl.id = 'whatsapp-privacy-style';
-			// BLUR STRATEGY (perf-critical, see Fedora report): blurring hundreds
-			// of leaf elements forces WebKitGTK to allocate a compositing layer
-			// per element, and animating filter re-runs Gaussian blur per frame.
-			// That caused 1.8 GB RAM spikes, 100% CPU and renderer aborts on
-			// Wayland. So: blur a handful of LARGE containers (conversation
-			// pane, viewer) plus the VISIBLE chat-list rows only — never
-			// animated, never transitioned. Hover-to-peek works on chat rows
-			// because a static :hover switch recomposites once per enter/leave
-			// instead of per mousemove; a child can never un-blur a blurred
-			// PARENT, which is why the list uses per-row (not container) blur.
+			// PRIVACY STRATEGY (perf-critical, see Fedora report): text is hidden
+			// with color:transparent + text-shadow, NOT filter:blur(). Filters
+			// force a compositing layer per element (1.8 GB spikes on Wayland)
+			// and a blurred PARENT can never be un-blurred by a hovered child,
+			// which rules out container blur entirely. Text-shadow hides only
+			// the glyphs — layout, avatars, timestamps and the reply box stay
+			// intact — and :hover restores the inherited color with a single
+			// static switch (never transitioned/animated).
+			// Primary target is WhatsApp's long-stable span.selectable-text
+			// (message bodies, chat names, previews); structural fallbacks
+			// cover rows whose spans lack that class. Timestamps/meta spans
+			// don't carry selectable-text, so they stay readable by design.
 			styleEl.textContent = [
-				// Layer 1: fullscreen media viewer stays fully hidden while
+				// Layer 1: names + previews in the chat list, hover row to peek.
+				'.privacy-mode #pane-side [role="row"] span.selectable-text,',
+				'.privacy-mode [data-testid="chat-list"] [role="row"] span.selectable-text,',
+				'.privacy-mode #pane-side [role="row"] span[title],',
+				'.privacy-mode [data-testid="chat-list"] [role="row"] span[title]',
+				'{ color: transparent !important; text-shadow: 0 0 10px rgba(0,0,0,.55) !important; }',
+				'.privacy-mode #pane-side [role="row"]:hover span.selectable-text,',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span.selectable-text,',
+				'.privacy-mode #pane-side [role="row"]:hover span[title],',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover span[title]',
+				'{ color: inherit !important; text-shadow: none !important; }',
+				// Layer 2: message text in the open conversation, hover bubble
+				// to peek. The input box is never touched, so replies work.
+				'.privacy-mode #main span.selectable-text,',
+				'.privacy-mode [data-testid="conversation-panel"] span.selectable-text',
+				'{ color: transparent !important; text-shadow: 0 0 10px rgba(0,0,0,.55) !important; }',
+				'.privacy-mode #main .message-in:hover span.selectable-text,',
+				'.privacy-mode #main .message-out:hover span.selectable-text,',
+				'.privacy-mode [data-testid="conversation-panel"] .message-in:hover span.selectable-text,',
+				'.privacy-mode [data-testid="conversation-panel"] .message-out:hover span.selectable-text',
+				'{ color: inherit !important; text-shadow: none !important; }',
+				// Layer 3: fullscreen media viewer stays fully hidden while
 				// privacy is on (one layer, no hover needed there).
 				'.privacy-mode [data-testid="media-viewer"]',
 				'{ filter: blur(12px) !important; }',
-				// Layer 2: chat-list rows blurred individually so hovering a
-				// row reveals it. Bounded to rows in the side pane, static only.
-				'.privacy-mode #pane-side [role="row"],',
-				'.privacy-mode [data-testid="chat-list"] [role="row"]',
-				'{ filter: blur(8px) !important; }',
-				'.privacy-mode #pane-side [role="row"]:hover,',
-				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover',
-				'{ filter: none !important; }',
-				// Layer 3: conversation messages blurred per bubble (bounded to
-				// visible messages, static only) so hovering one reveals it.
-				// The pane itself is NOT container-blurred: a blurred parent
-				// can never be un-blurred by a hovered child.
-				'.privacy-mode #main .message-in, .privacy-mode #main .message-out,',
-				'.privacy-mode [data-testid="conversation-panel"] .message-in,',
-				'.privacy-mode [data-testid="conversation-panel"] .message-out',
-				'{ filter: blur(10px) !important; }',
-				'.privacy-mode #main .message-in:hover, .privacy-mode #main .message-out:hover,',
-				'.privacy-mode [data-testid="conversation-panel"] .message-in:hover,',
-				'.privacy-mode [data-testid="conversation-panel"] .message-out:hover',
-				'{ filter: none !important; }',
 				// Layer 4: profile photos, only when the "blur avatars" setting
 				// is on (html.blur-avatars). Hovering the row/message reveals.
 				'.privacy-mode.blur-avatars #pane-side [role="row"] img,',
@@ -2598,7 +2601,7 @@ func getInitScript(ua string) string {
 					'      <strong class="wa-text-primary" style="font-size:12.5px;">Privacy Mode</strong>' +
 					'      <span id="wa-badge-priv" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
 					'    </div>' +
-					'    <div class="wa-text-muted" style="font-size:11px;">Blur chats and media until you turn this off. Hover a chat to peek.</div>' +
+					'    <div class="wa-text-muted" style="font-size:11px;">Hide names, previews & message text until you turn this off. Hover to peek; reply box stays usable.</div>' +
 					'  </div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'    <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
