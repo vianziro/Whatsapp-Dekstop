@@ -797,14 +797,16 @@ static void setupMacOSMenuBar(void) {
         NSMenuItem* aboutItem = [appMenu addItemWithTitle:@"About WhatsApp Desk" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
         [aboutItem setTarget:NSApp];
 
-        NSMenuItem* settingsItem = [appMenu addItemWithTitle:@"Settings..." action:@selector(menuSettings:) keyEquivalent:@","];
+        // NOTE: no key equivalents here on purpose. Every shortcut is owned
+        // by the page script (with toast feedback); a native equivalent for
+        // the same keys would fire the action TWICE (menu + page).
+        NSMenuItem* settingsItem = [appMenu addItemWithTitle:@"Settings..." action:@selector(menuSettings:) keyEquivalent:@""];
         [settingsItem setTarget:g_menuBridge];
 
         NSMenuItem* updateItem = [appMenu addItemWithTitle:@"Check for Updates..." action:@selector(menuCheckUpdates:) keyEquivalent:@""];
         [updateItem setTarget:g_menuBridge];
 
-        NSMenuItem* dlItem = [appMenu addItemWithTitle:@"Open Downloads Folder" action:@selector(menuOpenDownloads:) keyEquivalent:@"D"];
-        [dlItem setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        NSMenuItem* dlItem = [appMenu addItemWithTitle:@"Open Downloads Folder" action:@selector(menuOpenDownloads:) keyEquivalent:@""];
         [dlItem setTarget:g_menuBridge];
 
         [appMenu addItem:[NSMenuItem separatorItem]];
@@ -849,35 +851,30 @@ static void setupMacOSMenuBar(void) {
 
         [controlsMenu addItem:[NSMenuItem separatorItem]];
 
-        NSMenuItem* privItem = [controlsMenu addItemWithTitle:@"Toggle Privacy Mode" action:@selector(menuTogglePrivacy:) keyEquivalent:@"P"];
-        [privItem setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        // NOTE: shortcuts live in the page script only (see note above).
+        NSMenuItem* privItem = [controlsMenu addItemWithTitle:@"Toggle Privacy Mode" action:@selector(menuTogglePrivacy:) keyEquivalent:@""];
         [privItem setTarget:g_menuBridge];
 
-        NSMenuItem* topItem = [controlsMenu addItemWithTitle:@"Toggle Always on Top" action:@selector(menuToggleAlwaysOnTop:) keyEquivalent:@"T"];
-        [topItem setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        NSMenuItem* topItem = [controlsMenu addItemWithTitle:@"Toggle Always on Top" action:@selector(menuToggleAlwaysOnTop:) keyEquivalent:@""];
         [topItem setTarget:g_menuBridge];
 
-        NSMenuItem* muteItem = [controlsMenu addItemWithTitle:@"Toggle Audio Mute" action:@selector(menuToggleMuteAudio:) keyEquivalent:@"M"];
-        [muteItem setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        NSMenuItem* muteItem = [controlsMenu addItemWithTitle:@"Toggle Audio Mute" action:@selector(menuToggleMuteAudio:) keyEquivalent:@""];
         [muteItem setTarget:g_menuBridge];
 
         [controlsMenu addItem:[NSMenuItem separatorItem]];
 
-        NSMenuItem* relItem = [controlsMenu addItemWithTitle:@"Reload Chat" action:@selector(menuReloadChat:) keyEquivalent:@"r"];
+        NSMenuItem* relItem = [controlsMenu addItemWithTitle:@"Reload Chat" action:@selector(menuReloadChat:) keyEquivalent:@""];
         [relItem setTarget:g_menuBridge];
 
-        NSMenuItem* hardRelItem = [controlsMenu addItemWithTitle:@"Hard Refresh (Clear Cache)" action:@selector(menuHardRefresh:) keyEquivalent:@"R"];
-        [hardRelItem setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        NSMenuItem* hardRelItem = [controlsMenu addItemWithTitle:@"Hard Refresh (Clear Cache)" action:@selector(menuHardRefresh:) keyEquivalent:@""];
         [hardRelItem setTarget:g_menuBridge];
 
         [controlsMenu addItem:[NSMenuItem separatorItem]];
 
-        NSMenuItem* menuOpenFolder = [controlsMenu addItemWithTitle:@"Open Downloads Folder" action:@selector(menuOpenDownloads:) keyEquivalent:@"D"];
-        [menuOpenFolder setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        NSMenuItem* menuOpenFolder = [controlsMenu addItemWithTitle:@"Open Downloads Folder" action:@selector(menuOpenDownloads:) keyEquivalent:@""];
         [menuOpenFolder setTarget:g_menuBridge];
 
-        NSMenuItem* menuCheckUpdates = [controlsMenu addItemWithTitle:@"Check for Updates..." action:@selector(menuCheckUpdates:) keyEquivalent:@"U"];
-        [menuCheckUpdates setKeyEquivalentModifierMask:(NSEventModifierFlagShift | NSEventModifierFlagCommand)];
+        NSMenuItem* menuCheckUpdates = [controlsMenu addItemWithTitle:@"Check for Updates..." action:@selector(menuCheckUpdates:) keyEquivalent:@""];
         [menuCheckUpdates setTarget:g_menuBridge];
 
         NSMenuItem* menuSettingsDialog = [controlsMenu addItemWithTitle:@"Settings / Control Center..." action:@selector(menuSettings:) keyEquivalent:@","];
@@ -1279,6 +1276,12 @@ func runApp() {
 	})
 	_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
 		return setSpellCheckLang(lang)
+	})
+	_ = w.Bind("getBlurAvatarsNative", func() bool {
+		return getBlurAvatars()
+	})
+	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
+		return setBlurAvatars(on)
 	})
 
 	w.Init(getInitScript(userAgent))

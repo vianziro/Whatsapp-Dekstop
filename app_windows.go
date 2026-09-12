@@ -74,20 +74,20 @@ const (
 	DWMWA_TEXT_COLOR                          = 36
 
 	// Taskbar badge constants
-	TBF_NOPROGRESS   = 0x00000000
+	TBF_NOPROGRESS    = 0x00000000
 	TBF_INDETERMINATE = 0x00000001
-	TBF_NORMAL       = 0x00000002
-	TBF_ERROR        = 0x00000004
-	TBF_PAUSED       = 0x00000008
+	TBF_NORMAL        = 0x00000002
+	TBF_ERROR         = 0x00000004
+	TBF_PAUSED        = 0x00000008
 )
 
 var (
-	shell32                      = windows.NewLazySystemDLL("shell32.dll")
-	ole32                        = windows.NewLazySystemDLL("ole32.dll")
-	procCoCreateInstance         = ole32.NewProc("CoCreateInstance")
-	procCoInitializeEx           = ole32.NewProc("CoInitializeEx")
+	shell32              = windows.NewLazySystemDLL("shell32.dll")
+	ole32                = windows.NewLazySystemDLL("ole32.dll")
+	procCoCreateInstance = ole32.NewProc("CoCreateInstance")
+	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
 
-	taskbarList      *ITaskbarList3
+	taskbarList *ITaskbarList3
 )
 
 type ITaskbarList3 struct {
@@ -95,21 +95,21 @@ type ITaskbarList3 struct {
 }
 
 type ITaskbarList3Vtbl struct {
-	QueryInterface uintptr
-	AddRef         uintptr
-	Release        uintptr
-	HrInit         uintptr
-	AddTab         uintptr
-	DeleteTab      uintptr
-	ActivateTab    uintptr
-	SetActiveAlt   uintptr
+	QueryInterface       uintptr
+	AddRef               uintptr
+	Release              uintptr
+	HrInit               uintptr
+	AddTab               uintptr
+	DeleteTab            uintptr
+	ActivateTab          uintptr
+	SetActiveAlt         uintptr
 	MarkFullscreenWindow uintptr
-	SetProgressValue uintptr
-	SetProgressState uintptr
-	RegisterTab    uintptr
-	UnregisterTab  uintptr
-	SetTabOrder    uintptr
-	SetTabProperties uintptr
+	SetProgressValue     uintptr
+	SetProgressState     uintptr
+	RegisterTab          uintptr
+	UnregisterTab        uintptr
+	SetTabOrder          uintptr
+	SetTabProperties     uintptr
 }
 
 func (t *ITaskbarList3) HrInit() error {
@@ -142,7 +142,7 @@ func initTaskbarList() error {
 	}
 	// Initialize COM
 	ret, _, _ := procCoInitializeEx.Call(0, 0) // COINIT_APARTMENTTHREADED
-	if ret != 0 && ret != 0x80010106 { // S_FALSE or RPC_E_CHANGED_MODE
+	if ret != 0 && ret != 0x80010106 {         // S_FALSE or RPC_E_CHANGED_MODE
 		// Ignore if already initialized
 	}
 
@@ -438,11 +438,11 @@ func configureWindow(hwnd uintptr) {
 
 // monitorInfo mirrors the Win32 MONITORINFOEXW layout (wide name at the end).
 type monitorInfo struct {
-	CbSize        uint32
-	RcMonitor     RECT
-	RcWork        RECT
-	DwFlags       uint32
-	SzDevice      [32]uint16
+	CbSize    uint32
+	RcMonitor RECT
+	RcWork    RECT
+	DwFlags   uint32
+	SzDevice  [32]uint16
 }
 
 // windowMonitorKey identifies the monitor the window's top-left corner sits
@@ -795,6 +795,12 @@ func runApp() {
 	})
 	_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
 		return setSpellCheckLang(lang)
+	})
+	_ = w.Bind("getBlurAvatarsNative", func() bool {
+		return getBlurAvatars()
+	})
+	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
+		return setBlurAvatars(on)
 	})
 
 	// Taskbar badge binding

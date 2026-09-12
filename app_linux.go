@@ -265,7 +265,7 @@ static gboolean tray_method_call(GDBusConnection* conn, const gchar* sender, con
 			g_variant_get(params, "(&s)", &iface);
 			GVariantBuilder builder;
 			g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
-			
+
 			const gchar* props[] = {"Id", "Title", "Status", "Category", "IconName", "IconPixmap", "OverlayIconName", "OverlayIconPixmap", "ToolTip", "Menu", NULL};
 			for (int i = 0; props[i]; i++) {
 				GError* error = NULL;
@@ -294,7 +294,7 @@ static GVariant* tray_build_menu_items(void) {
 	// type: "standard", "check", "radio", "separator"
 	GVariantBuilder builder;
 	g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iisssis)"));
-	
+
 	// Show Window
 	g_variant_builder_add(&builder, "(iisssis)", 1, 0, "standard", "Show Window", "window-new", "", TRUE);
 	// Separator
@@ -319,7 +319,7 @@ static GVariant* tray_build_menu_items(void) {
 	g_variant_builder_add(&builder, "(iisssis)", 11, 0, "separator", "", "", "", FALSE);
 	// Quit
 	g_variant_builder_add(&builder, "(iisssis)", 12, 0, "standard", "Quit WhatsApp Desk", "application-exit", "", TRUE);
-	
+
 	return g_variant_builder_end(&builder);
 }
 
@@ -351,7 +351,7 @@ void tray_update_overlay_icon_go(int count) {
 static void tray_on_bus_acquired(GDBusConnection* conn, const gchar* name, gpointer user_data) {
 	g_dbus_conn = conn;
 	g_introspection = g_dbus_node_info_new_for_xml(tray_introspection_xml, NULL);
-	
+
 	// Register StatusNotifierItem
 	GError* error = NULL;
 	g_dbus_reg_id = g_dbus_connection_register_object(conn,
@@ -363,14 +363,14 @@ static void tray_on_bus_acquired(GDBusConnection* conn, const gchar* name, gpoin
 		g_print("Failed to register StatusNotifierItem: %s\n", error->message);
 		g_error_free(error);
 	}
-	
+
 	// Register Menu
 	g_dbus_connection_register_object(conn,
 		"/org/kde/StatusNotifierItem/Menu",
 		g_introspection->interfaces[1],
 		&tray_vtable,
 		NULL, NULL, NULL);
-	
+
 	// Register on StatusNotifierWatcher
 	GVariant* params = g_variant_new("(ss)", "org.kde.StatusNotifierItem", "/org/kde/StatusNotifierItem");
 	g_dbus_connection_call_sync(conn,
@@ -379,7 +379,7 @@ static void tray_on_bus_acquired(GDBusConnection* conn, const gchar* name, gpoin
 		"org.kde.StatusNotifierWatcher",
 		"RegisterStatusNotifierItem",
 		params, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-	
+
 	g_tray_visible = 1;
 }
 
@@ -399,7 +399,7 @@ static void tray_init(const char* icon_path) {
 	if (icon_path && icon_path[0]) {
 		strncpy(g_tray_icon_path, icon_path, sizeof(g_tray_icon_path) - 1);
 	}
-	
+
 	g_bus_own_name(G_BUS_TYPE_SESSION,
 		"org.kde.StatusNotifierItem-whatsapp-desk",
 		G_BUS_NAME_OWNER_FLAGS_NONE,
@@ -433,7 +433,7 @@ static void tray_shutdown(void) {
 			"org.kde.StatusNotifierWatcher",
 			"UnregisterStatusNotifierItem",
 			params, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-		
+
 		if (g_dbus_reg_id) {
 			g_dbus_connection_unregister_object(g_dbus_conn, g_dbus_reg_id);
 			g_dbus_reg_id = 0;
@@ -846,6 +846,12 @@ func runApp() {
 	})
 	_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
 		return setSpellCheckLang(lang)
+	})
+	_ = w.Bind("getBlurAvatarsNative", func() bool {
+		return getBlurAvatars()
+	})
+	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
+		return setBlurAvatars(on)
 	})
 
 	w.Init(getInitScript(userAgentLinux))

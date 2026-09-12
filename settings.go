@@ -25,6 +25,7 @@ type AppSettings struct {
 	OrganizeByMonth   bool   `json:"organize_by_month"`
 	SpellCheckEnabled bool   `json:"spell_check_enabled"`
 	SpellCheckLang    string `json:"spell_check_lang"`
+	BlurAvatars       bool   `json:"blur_avatars"`
 }
 
 func getDefaultDownloadDir() string {
@@ -154,6 +155,17 @@ func setSpellCheckLang(lang string) string {
 	s.SpellCheckLang = lang
 	_ = saveSettings(s)
 	return s.SpellCheckLang
+}
+
+func getBlurAvatars() bool {
+	return loadSettings().BlurAvatars
+}
+
+func setBlurAvatars(on bool) bool {
+	s := loadSettings()
+	s.BlurAvatars = on
+	_ = saveSettings(s)
+	return s.BlurAvatars
 }
 
 // fileExistsInDownloadDir reports whether filename exists anywhere the saver

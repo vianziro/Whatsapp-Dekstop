@@ -1218,24 +1218,50 @@ func getInitScript(ua string) string {
 			// of leaf elements forces WebKitGTK to allocate a compositing layer
 			// per element, and animating filter re-runs Gaussian blur per frame.
 			// That caused 1.8 GB RAM spikes, 100% CPU and renderer aborts on
-			// Wayland. So: blur only a handful of LARGE containers (main pane,
-			// chat list, viewer), never per-element, never animated. "Reveal on
-			// hover" is dropped on CSS-blurred containers — use the privacy
-			// toggle instead — because :hover on blurred layers re-triggers the
-			// expensive filter path on every mouse move.
+			// Wayland. So: blur a handful of LARGE containers (conversation
+			// pane, viewer) plus the VISIBLE chat-list rows only — never
+			// animated, never transitioned. Hover-to-peek works on chat rows
+			// because a static :hover switch recomposites once per enter/leave
+			// instead of per mousemove; a child can never un-blur a blurred
+			// PARENT, which is why the list uses per-row (not container) blur.
 			styleEl.textContent = [
-				// Layer 1: large containers only (a handful of layers total)
-				'.privacy-mode #main,',
-				'.privacy-mode [data-testid="conversation-panel"],',
-				'.privacy-mode [data-testid="chat-list"],',
-				'.privacy-mode #pane-side,',
+				// Layer 1: fullscreen media viewer stays fully hidden while
+				// privacy is on (one layer, no hover needed there).
 				'.privacy-mode [data-testid="media-viewer"]',
 				'{ filter: blur(12px) !important; }',
-				// Layer 2: fallback for deployments where the containers above
-				// don't exist — still bounded to visible message bubbles, not
-				// every img/video in the DOM.
-				'.privacy-mode .message-in, .privacy-mode .message-out',
-				'{ filter: blur(12px) !important; }',
+				// Layer 2: chat-list rows blurred individually so hovering a
+				// row reveals it. Bounded to rows in the side pane, static only.
+				'.privacy-mode #pane-side [role="row"],',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]',
+				'{ filter: blur(8px) !important; }',
+				'.privacy-mode #pane-side [role="row"]:hover,',
+				'.privacy-mode [data-testid="chat-list"] [role="row"]:hover',
+				'{ filter: none !important; }',
+				// Layer 3: conversation messages blurred per bubble (bounded to
+				// visible messages, static only) so hovering one reveals it.
+				// The pane itself is NOT container-blurred: a blurred parent
+				// can never be un-blurred by a hovered child.
+				'.privacy-mode #main .message-in, .privacy-mode #main .message-out,',
+				'.privacy-mode [data-testid="conversation-panel"] .message-in,',
+				'.privacy-mode [data-testid="conversation-panel"] .message-out',
+				'{ filter: blur(10px) !important; }',
+				'.privacy-mode #main .message-in:hover, .privacy-mode #main .message-out:hover,',
+				'.privacy-mode [data-testid="conversation-panel"] .message-in:hover,',
+				'.privacy-mode [data-testid="conversation-panel"] .message-out:hover',
+				'{ filter: none !important; }',
+				// Layer 4: profile photos, only when the "blur avatars" setting
+				// is on (html.blur-avatars). Hovering the row/message reveals.
+				'.privacy-mode.blur-avatars #pane-side [role="row"] img,',
+				'.privacy-mode.blur-avatars #side header img,',
+				'.privacy-mode.blur-avatars #main header img',
+				'{ filter: blur(8px) !important; }',
+				'.privacy-mode.blur-avatars #pane-side [role="row"] img:hover,',
+				'.privacy-mode.blur-avatars #pane-side [role="row"]:hover img,',
+				'.privacy-mode.blur-avatars #side header img:hover,',
+				'.privacy-mode.blur-avatars #main header img:hover,',
+				'.privacy-mode.blur-avatars #main .message-in:hover img,',
+				'.privacy-mode.blur-avatars #main .message-out:hover img',
+				'{ filter: none !important; }',
 				// Drag & drop visual feedback
 				'.wa-drag-over { outline: 3px solid #00a884; outline-offset: -3px; }',
 				'.wa-drag-over * { pointer-events: none; }'
@@ -1243,14 +1269,22 @@ func getInitScript(ua string) string {
 
 			function applyPrivacyMode(active, silent) {
 				isPrivacyActive = !!active;
+				// State lives on <html>, NEVER on <body>: the theme observer
+				// watches body classes, and WhatsApp's own theme engine also
+				// rewrites body classes — a state class on body lets the two
+				// sides retrigger each other into a 100%-CPU observer war that
+				// starves the event loop (frozen clicks/keys, stuck splash).
+				// All privacy selectors are descendant selectors, so they
+				// match identically from the <html> ancestor.
+				var rootEl = document.documentElement;
 				if (isPrivacyActive) {
 					if (!document.getElementById('whatsapp-privacy-style')) {
 						document.head.appendChild(styleEl);
 					}
-					document.body.classList.add('privacy-mode');
+					rootEl.classList.add('privacy-mode');
 					if (!silent) showFloatingToast('🔒 Privacy Mode: Enabled');
 				} else {
-					document.body.classList.remove('privacy-mode');
+					rootEl.classList.remove('privacy-mode');
 					if (!silent) showFloatingToast('🔓 Privacy Mode: Disabled');
 				}
 				return isPrivacyActive;
@@ -1263,6 +1297,26 @@ func getInitScript(ua string) string {
 			window.isPrivacyModeActive = function() {
 				return isPrivacyActive;
 			};
+
+			// "Blur profile photos" setting: gates the .blur-avatars layer.
+			// Applied on <html> next to .privacy-mode; persisted natively.
+			window.isBlurAvatars = function() {
+				return document.documentElement.classList.contains('blur-avatars');
+			};
+			window.setBlurAvatars = function(on) {
+				on = !!on;
+				if (on) document.documentElement.classList.add('blur-avatars');
+				else document.documentElement.classList.remove('blur-avatars');
+				if (window.setBlurAvatarsNative) {
+					Promise.resolve(window.setBlurAvatarsNative(on)).catch(function() {});
+				}
+				return on;
+			};
+			if (window.getBlurAvatarsNative) {
+				window.getBlurAvatarsNative().then(function(on) {
+					if (on) document.documentElement.classList.add('blur-avatars');
+				}).catch(function() {});
+			}
 
 			// Auto-lock on idle: the Control Center copy promises "blur chats and
 			// media when cursor is idle", so honor it. When enabled, the app
@@ -2192,9 +2246,10 @@ func getInitScript(ua string) string {
 			function scheduleScan() {
 				if (savedScanQueued || shouldPauseBackgroundWork()) return;
 				// Hard throttle: the panel observer fires on every DOM mutation
-				// while WhatsApp virtualizes lists; 1s between scans is plenty.
+				// while WhatsApp virtualizes lists; 2s between scans is plenty
+				// for a "saved" badge that is purely informational.
 				var now = Date.now();
-				if (now - lastSavedScanAt < 1000) return;
+				if (now - lastSavedScanAt < 2000) return;
 				savedScanQueued = true;
 				requestAnimationFrame(function() {
 					savedScanQueued = false;
@@ -2203,8 +2258,23 @@ func getInitScript(ua string) string {
 				});
 			}
 
-			// Observe panel/dialog appearances instead of polling.
-			var panelObserver = new MutationObserver(scheduleScan);
+			// Observe only where badges can appear (open dialog/viewer or the
+			// chat pane). Chat-list churn in #pane-side never needs a rescan,
+			// so ignore mutations outside the relevant scope entirely.
+			function panelMutationRelevant(muts) {
+				for (var i = 0; i < muts.length; i++) {
+					var t = muts[i].target;
+					if (t && t.closest) {
+						try {
+							if (t.closest('#main, [role="dialog"], [data-testid="media-viewer"], #wa-doc-modal-overlay')) return true;
+						} catch (e) {}
+					}
+				}
+				return false;
+			}
+			var panelObserver = new MutationObserver(function(muts) {
+				if (panelMutationRelevant(muts)) scheduleScan();
+			});
 			function watchRoot() {
 				var root = document.body;
 				if (root) panelObserver.observe(root, { childList: true, subtree: true });
@@ -2279,13 +2349,30 @@ func getInitScript(ua string) string {
 					window.syncToolbarBtnTheme(isDark);
 				}
 
-				// 4. Ensure MutationObserver prevents WhatsApp from reverting body theme class
+				// 4. Repair our theme classes only when they were actually
+				// stripped. Repairing unconditionally on every body-class
+				// mutation lets our observer and WhatsApp's theme engine
+				// retrigger each other forever (100%-CPU observer war that
+				// starves the event loop: frozen clicks/keys, stuck splash).
 				if (window.MutationObserver && document.body) {
 					if (!themeObserver) {
 						themeObserver = new MutationObserver(function() {
 							if (shouldPauseBackgroundWork()) return;
 							var shouldBeDark = (currentTheme === 'system') ? getSystemIsDark() : (currentTheme === 'dark');
-							applyThemeClasses(shouldBeDark);
+							var want = shouldBeDark ? 'dark' : 'light';
+							var root = document.documentElement;
+							var repaired = false;
+							if (root && !root.classList.contains(want)) {
+								root.classList.add(want);
+								root.classList.remove(shouldBeDark ? 'light' : 'dark');
+								repaired = true;
+							}
+							if (document.body && !document.body.classList.contains(want)) {
+								document.body.classList.add(want);
+								document.body.classList.remove(shouldBeDark ? 'light' : 'dark');
+								repaired = true;
+							}
+							if (repaired) applyThemeToDOM(currentTheme);
 						});
 					}
 					themeObserver.disconnect();
@@ -2410,6 +2497,7 @@ func getInitScript(ua string) string {
 			// button. Watch only #side/header region changes (rAF-coalesced)
 			// instead of scanning the whole page every 2 seconds forever.
 			var toolbarCheckQueued = false;
+			var toolbarNarrowed = false;
 			var toolbarObserver = new MutationObserver(function() {
 				if (toolbarCheckQueued || shouldPauseBackgroundWork()) return;
 				toolbarCheckQueued = true;
@@ -2418,11 +2506,27 @@ func getInitScript(ua string) string {
 					if (!document.getElementById('wa-toolbar-settings-btn')) {
 						injectHeaderToolbarBtn();
 					}
+					// Narrow the observed root once the header exists.
+					if (!toolbarNarrowed) {
+						var hdr = document.querySelector('#side header');
+						if (hdr) {
+							toolbarNarrowed = true;
+							toolbarObserver.disconnect();
+							toolbarObserver.observe(hdr, { childList: true, subtree: true });
+						}
+					}
 				});
 			});
 			function watchToolbarRoot() {
-				var root = document.querySelector('#side') || document.body;
-				if (root) toolbarObserver.observe(root, { childList: true, subtree: true });
+				// Prefer the header itself: the chat list churns constantly and
+				// never affects our button. Fall back to #side, then body, and
+				// narrow down to the header as soon as it exists.
+				var root = document.querySelector('#side header') || document.querySelector('#side') || document.body;
+				if (root) {
+					toolbarNarrowed = !!document.querySelector('#side header');
+					toolbarObserver.disconnect();
+					toolbarObserver.observe(root, { childList: true, subtree: true });
+				}
 			}
 			watchToolbarRoot();
 			document.addEventListener('DOMContentLoaded', watchToolbarRoot, { once: true });
@@ -2494,7 +2598,7 @@ func getInitScript(ua string) string {
 					'      <strong class="wa-text-primary" style="font-size:12.5px;">Privacy Mode</strong>' +
 					'      <span id="wa-badge-priv" style="font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600;">...</span>' +
 					'    </div>' +
-					'    <div class="wa-text-muted" style="font-size:11px;">Blur chats and media until you turn this off.</div>' +
+					'    <div class="wa-text-muted" style="font-size:11px;">Blur chats and media until you turn this off. Hover a chat to peek.</div>' +
 					'  </div>' +
 					'  <div style="display:flex;align-items:center;justify-content:space-between;">' +
 					'    <span class="wa-text-muted" style="font-size:10px;font-family:monospace;">' + (isMac ? 'Cmd' : 'Ctrl') + '+Shift+P</span>' +
@@ -2504,6 +2608,10 @@ func getInitScript(ua string) string {
 					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
 					'  <input type="checkbox" id="wa-priv-autolock" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
 					'  <span class="wa-text-muted" style="font-size:11px;">Auto-lock when idle or window loses focus (unblurs on activity)</span>' +
+					'</label>' +
+					'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+					'  <input type="checkbox" id="wa-blur-avatars" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+					'  <span class="wa-text-muted" style="font-size:11px;">Also blur profile photos (hover to peek)</span>' +
 					'</label>';
 				quickGrid.appendChild(cardPrivacy);
 
@@ -2781,6 +2889,16 @@ func getInitScript(ua string) string {
 						showFloatingToast(autoLockBox.checked ?
 							'🔒 Privacy auto-lock: on (blurs after 60s idle)' :
 							'🔓 Privacy auto-lock: off');
+					};
+				}
+				var avatarBox = document.getElementById('wa-blur-avatars');
+				if (avatarBox) {
+					avatarBox.checked = !!(window.isBlurAvatars && window.isBlurAvatars());
+					avatarBox.onchange = function() {
+						if (window.setBlurAvatars) window.setBlurAvatars(avatarBox.checked);
+						showFloatingToast(avatarBox.checked ?
+							'🙈 Profile photos: blurred (hover to peek)' :
+							'🙉 Profile photos: visible');
 					};
 				}
 				document.getElementById('wa-action-toggle-pin').onclick = function() {
