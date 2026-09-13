@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="WhatsApp Desk — a focused desktop companion for WhatsApp Web on macOS, Windows, Linux, and Fedora.">
+  <title>WhatsApp Desk — A lighter desktop companion</title>
+  <style>
+    :root { --ink:#e9eee9; --muted:#9aa79f; --green:#18c77b; --deep:#07110e; --line:rgba(233,238,233,.13); --panel:#0d1b16; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:var(--deep); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.3; background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px); background-size:42px 42px; mask-image:linear-gradient(#000,transparent 72%); }
+    a { color:inherit; }
+    .wrap { max-width:1180px; margin:auto; padding:0 26px; position:relative; }
+    nav { height:82px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:10px; font-family:Georgia,serif; font-size:21px; letter-spacing:-.5px; text-decoration:none; }
+    .brand i { display:block; width:11px; height:11px; border-radius:99px; background:var(--green); box-shadow:0 0 24px var(--green); }
+    .nav-link { color:var(--muted); font-size:12px; text-decoration:none; }
+    .hero { min-height:670px; display:grid; grid-template-columns:1.06fr .94fr; align-items:center; gap:52px; padding:88px 0 70px; }
+    .eyebrow { color:var(--green); font-size:12px; text-transform:uppercase; letter-spacing:.16em; }
+    h1 { font-family:Georgia,serif; font-size:clamp(48px,7vw,86px); font-weight:400; line-height:.94; letter-spacing:-.07em; margin:22px 0 24px; }
+    h1 em { color:var(--green); font-style:normal; }
+    .lead { max-width:550px; color:#bdc8c0; font-family:Georgia,serif; font-size:20px; line-height:1.45; }
+    .download { margin-top:34px; display:inline-flex; align-items:center; gap:12px; background:var(--green); border:1px solid var(--green); border-radius:4px; color:#06100c; padding:16px 20px; font:700 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace; text-decoration:none; box-shadow:0 12px 35px rgba(24,199,123,.18); transition:transform .2s,box-shadow .2s; }
+    .download:hover { transform:translateY(-2px); box-shadow:0 18px 45px rgba(24,199,123,.28); }
+    .download svg { width:17px; height:17px; }
+    .under { display:block; color:var(--muted); margin-top:13px; font-size:10px; }
+    .frame { position:relative; padding:13px; border:1px solid rgba(24,199,123,.35); border-radius:12px; background:linear-gradient(145deg,rgba(24,199,123,.12),transparent 42%),#0b1713; transform:rotate(2deg); box-shadow:26px 28px 0 rgba(24,199,123,.07); }
+    .frame img { width:100%; display:block; border-radius:5px; filter:saturate(.9); }
+    .frame::after { content:"v1.5.9.2"; position:absolute; right:18px; bottom:-12px; color:var(--green); background:var(--deep); padding:5px 9px; font-size:10px; border:1px solid var(--line); }
+    .strip { border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:grid; grid-template-columns:repeat(4,1fr); }
+    .strip div { padding:22px 18px; color:var(--muted); font-size:11px; border-right:1px solid var(--line); }
+    .strip strong { display:block; color:var(--ink); font-size:15px; margin-bottom:5px; }
+    section { padding:118px 0; }
+    .section-title { display:grid; grid-template-columns:1fr 1fr; gap:45px; margin-bottom:48px; }
+    h2 { font:400 clamp(34px,4vw,58px)/.98 Georgia,serif; letter-spacing:-.055em; margin:0; }
+    .section-title p { color:var(--muted); font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; margin:0; align-self:end; }
+    .features { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--line); border-left:1px solid var(--line); }
+    .feature { min-height:184px; padding:25px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); background:rgba(255,255,255,.015); }
+    .feature b { color:var(--green); font-size:11px; }
+    .feature h3 { font:400 24px/1.1 Georgia,serif; margin:19px 0 10px; }
+    .feature p { color:var(--muted); font-size:11px; line-height:1.65; margin:0; }
+    .downloads { background:#0b1813; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+    .download-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+    .platform { padding:22px; border:1px solid var(--line); background:#0d1e18; min-height:170px; display:flex; flex-direction:column; }
+    .platform span { color:var(--green); font-size:11px; }
+    .platform h3 { font:400 27px Georgia,serif; margin:16px 0 8px; }
+    .platform p { color:var(--muted); font-size:10px; line-height:1.55; margin:0 0 18px; }
+    .platform a { color:var(--ink); font-size:11px; margin-top:auto; text-decoration-thickness:1px; text-underline-offset:4px; }
+    .note { padding:18px 0 0; color:var(--muted); font-size:10px; line-height:1.6; }
+    .release { display:grid; grid-template-columns:.75fr 1.25fr; gap:38px; align-items:center; padding:95px 0; }
+    .release img { width:100%; border:1px solid var(--line); }
+    .release p { color:var(--muted); font:14px/1.7 Georgia,serif; }
+    footer { padding:32px 0 44px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:18px; color:#718078; font-size:10px; }
+    @media (max-width:820px) { .hero,.section-title,.release { grid-template-columns:1fr; } .hero { padding-top:60px; } .frame { max-width:560px; margin:10px auto; } .strip,.download-grid,.features { grid-template-columns:1fr 1fr; } .strip div:nth-child(2) { border-right:0; } }
+    @media (max-width:520px) { .wrap { padding:0 18px; } nav { height:67px; } .nav-link { display:none; } .strip,.download-grid,.features { grid-template-columns:1fr; } .strip div { border-right:0; } section { padding:75px 0; } footer { flex-direction:column; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="#top"><i></i>WhatsApp Desk</a>
+      <a class="nav-link" href="https://github.com/vianziro/Whatsapp-Dekstop/releases/latest">GitHub Releases ↗</a>
+    </nav>
+    <main id="top">
+      <div class="hero">
+        <div>
+          <div class="eyebrow">Independent desktop companion</div>
+          <h1>WhatsApp,<br><em>at your desk.</em></h1>
+          <p class="lead">A focused desktop home for WhatsApp Web—built with the native web engine already on your computer.</p>
+          <a id="smart-download" class="download" href="https://github.com/vianziro/Whatsapp-Dekstop/releases/latest">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
+            <span>Download latest release</span>
+          </a>
+          <span id="platform-hint" class="under">Checking your platform…</span>
+        </div>
+        <div class="frame"><img src="assets/app-dark.png" alt="WhatsApp Desk chat window preview"></div>
+      </div>
+      <div class="strip"><div><strong>Native engine</strong>Uses WebKit, WebView2, or WebKitGTK.</div><div><strong>Private by design</strong>No analytics server or message relay.</div><div><strong>One download</strong>Files saved once, then reused locally.</div><div><strong>v1.5.9.2</strong>Less background work while scrolling.</div></div>
+    </main>
+  </div>
+  <section><div class="wrap"><div class="section-title"><h2>Small details.<br>Better desk time.</h2><p>WhatsApp Desk stays close to WhatsApp Web while adding the desktop controls that matter every day.</p></div><div class="features"><article class="feature"><b>01 / DOCUMENTS</b><h3>Preview, then decide.</h3><p>Open PDFs and common office files without unnecessary duplicate downloads.</p></article><article class="feature"><b>02 / CONTROL</b><h3>Your window, your way.</h3><p>Theme, privacy mode, always-on-top, audio mute, startup, and download location.</p></article><article class="feature"><b>03 / PERFORMANCE</b><h3>Quiet in the background.</h3><p>Non-essential enhancement work yields while busy chat lists are scrolling.</p></article></div></div></section>
+  <section class="downloads" id="download"><div class="wrap"><div class="section-title"><h2>Get the right<br>build.</h2><p>Automatic detection is a convenience. Every release is also available for manual download.</p></div><div class="download-grid"><article class="platform"><span>UNIVERSAL</span><h3>macOS</h3><p>Apple Silicon and Intel. DMG installer.</p><a href="https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.dmg">Download DMG ↗</a></article><article class="platform"><span>X64</span><h3>Windows</h3><p>Windows 10/11. WebView2 required.</p><a href="https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe">Download EXE ↗</a></article><article class="platform"><span>X64</span><h3>Linux</h3><p>Debian/Ubuntu package or portable archive.</p><a href="https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-amd64.deb">Download DEB ↗</a></article><article class="platform"><span>X64</span><h3>Fedora</h3><p>Fedora/RHEL package using WebKitGTK 4.1.</p><a href="https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Fedora-x64.rpm">Download RPM ↗</a></article></div><p class="note">Linux ARM64 users can find compatible assets in the GitHub release archive. If detection is incorrect, select a platform manually above.</p></div></section>
+  <div class="wrap"><section class="release"><img src="assets/release-1.5.9.2-announcement.png" alt="WhatsApp Desk version 1.5.9.2 announcement"><div><div class="eyebrow">Latest release / 1.5.9.2</div><h2 style="margin-top:18px">More stable.<br>Less in the way.</h2><p>This update reduces extra observer work during busy scrolling and adds a small local diagnostics panel. No chat data is sent by these checks.</p><a class="download" href="https://github.com/vianziro/Whatsapp-Dekstop/releases/tag/v1.5.9.2">View release notes ↗</a></div></section><footer><span>WhatsApp Desk is an independent application and is not affiliated with Meta.</span><span>MIT License · 2026</span></footer></div>
+  <script>
+    (function () {
+      var links = {
+        mac: ['https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.dmg', 'Download for macOS'],
+        windows: ['https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe', 'Download for Windows'],
+        fedora: ['https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Fedora-x64.rpm', 'Download for Fedora'],
+        linux: ['https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz', 'Download for Linux']
+      };
+      var ua = navigator.userAgent || '';
+      var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+      var selected = /mac/i.test(platform) ? 'mac' : /win/i.test(platform) ? 'windows' : /linux/i.test(platform) ? (/fedora|rhel|red hat/i.test(ua) ? 'fedora' : 'linux') : null;
+      var button = document.getElementById('smart-download');
+      var hint = document.getElementById('platform-hint');
+      if (selected) { button.href = links[selected][0]; button.querySelector('span').textContent = links[selected][1]; hint.textContent = 'Detected: ' + links[selected][1].replace('Download for ', '') + '. You can choose another build below.'; }
+      else { hint.textContent = 'Choose your platform below for the correct installer.'; }
+    }());
+  </script>
+</body>
+</html>
