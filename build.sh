@@ -26,11 +26,16 @@ build_windows() {
     if [ "$(uname -s)" != "MINGW"* ] && [ "$(uname -s)" != "MSYS"* ] && [ "${GOOS:-}" != "windows" ]; then
         echo "Note: Windows builds need a Windows host (or mingw-w64 + WebView2 SDK)."
     fi
+    CGO_FLAG=1
     if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 && [ "$(uname -s)" != "MINGW"* ]; then
-        echo "Warning: mingw-w64 cross compiler not found; attempting native toolchain."
+        # go-webview2 is pure Go on Windows. Building without cgo makes the
+        # cross-platform release reproducible on macOS/Linux hosts that do
+        # not carry a MinGW toolchain.
+        echo "MinGW not found; building the pure-Go WebView2 target with CGO disabled."
+        CGO_FLAG=0
     fi
     rm -f WhatsAppDesk.exe
-    GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED="${CGO_FLAG}" \
         go build -ldflags="-s -w -buildid= -H windowsgui -X main.appVersion=${VERSION}" \
         -trimpath -o WhatsAppDesk.exe .
     rm -f WhatsApp-Desk-Windows-x64.zip
