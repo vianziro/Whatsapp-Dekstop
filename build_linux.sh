@@ -27,19 +27,37 @@ if command -v pkg-config >/dev/null 2>&1; then
         echo "Debian/Ubuntu: sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev"
         echo "Fedora/RHEL:   sudo dnf install -y gtk3-devel webkit2gtk4.0-devel"
     fi
+	# Fedora ships WebKitGTK 4.1 but the upstream webview package still asks
+	# pkg-config for the historical 4.0 name. Provide a build-time alias only;
+	# this links the produced binary against Fedora's real 4.1 library.
+	if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.1; then
+		WEBKIT_PC_DIR="$(pkg-config --variable=pcfiledir webkit2gtk-4.1)"
+		WEBKIT_PC_ALIAS_DIR="$(mktemp -d)"
+		ln -s "${WEBKIT_PC_DIR}/webkit2gtk-4.1.pc" "${WEBKIT_PC_ALIAS_DIR}/webkit2gtk-4.0.pc"
+		export PKG_CONFIG_PATH="${WEBKIT_PC_ALIAS_DIR}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+		trap 'rm -rf "${WEBKIT_PC_ALIAS_DIR}"' EXIT
+	fi
 fi
 
-rm -rf "${OUTPUT_DIR}" "${APP_NAME}"
-mkdir -p "${OUTPUT_DIR}"
+if [ "${WA_DESK_USE_EXISTING_OUTPUT:-0}" = "1" ]; then
+    # Packaging-only mode is useful when a CI runner receives a tested Linux
+    # binary from a separate build job (for example, to create an RPM).
+    test -x "${OUTPUT_DIR}/${APP_NAME}"
+    test -f "${OUTPUT_DIR}/${APP_NAME}.desktop"
+    test -f "${OUTPUT_DIR}/icon.png"
+    echo "Reusing existing Linux build output for packaging."
+else
+    rm -rf "${OUTPUT_DIR}" "${APP_NAME}"
+    mkdir -p "${OUTPUT_DIR}"
 
-echo "Compiling Linux binary..."
-go build -ldflags="-s -w -buildid= -X main.appVersion=${VERSION}" -trimpath -o "${OUTPUT_DIR}/${APP_NAME}" .
+    echo "Compiling Linux binary..."
+    go build -ldflags="-s -w -buildid= -X main.appVersion=${VERSION}" -trimpath -o "${OUTPUT_DIR}/${APP_NAME}" .
 
-# Copy assets
-cp icon.png "${OUTPUT_DIR}/"
+    # Copy assets
+    cp icon.png "${OUTPUT_DIR}/"
 
-# Generate .desktop launcher
-cat << EOF > "${OUTPUT_DIR}/${APP_NAME}.desktop"
+    # Generate .desktop launcher
+    cat << EOF > "${OUTPUT_DIR}/${APP_NAME}.desktop"
 [Desktop Entry]
 Type=Application
 Version=1.0
@@ -52,6 +70,7 @@ Categories=Network;InstantMessaging;Chat;
 StartupWMClass=${APP_NAME}
 Keywords=WhatsApp;Chat;Messenger;
 EOF
+fi
 
 # Create tar.gz release bundle
 echo "Creating release tarball (WhatsApp-Desk-Linux-${BUNDLE_ARCH}.tar.gz)..."
@@ -101,9 +120,10 @@ fi
 # Build a native Fedora/RHEL package when rpmbuild is available. The portable
 # tarball remains the updater payload because it works across both Fedora and
 # Debian-family releases; the RPM is for normal system installation.
-if command -v rpmbuild >/dev/null 2>&1; then
+if command -v rpmbuild >/dev/null 2>&1 && { [ "${WA_DESK_BUILD_RPM:-0}" = "1" ] || [ -f /etc/fedora-release ]; }; then
     echo "Building Fedora/RHEL package (.rpm)..."
     RPM_TOPDIR="${PWD}/rpmbuild"
+	SOURCE_ROOT="${PWD}"
     rm -rf "${RPM_TOPDIR}"
     mkdir -p "${RPM_TOPDIR}/BUILDROOT" "${RPM_TOPDIR}/RPMS" "${RPM_TOPDIR}/SPECS"
     cat > "${RPM_TOPDIR}/SPECS/${APP_NAME}.spec" << EOF
@@ -121,9 +141,9 @@ Independent WhatsApp desktop client built with Go and the native WebKit engine.
 
 %install
 mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/applications %{buildroot}/usr/share/icons/hicolor/512x512/apps
-install -m 755 ${OUTPUT_DIR}/${APP_NAME} %{buildroot}/usr/bin/${APP_NAME}
-install -m 644 ${OUTPUT_DIR}/${APP_NAME}.desktop %{buildroot}/usr/share/applications/${APP_NAME}.desktop
-install -m 644 icon.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png
+install -m 755 ${SOURCE_ROOT}/${OUTPUT_DIR}/${APP_NAME} %{buildroot}/usr/bin/${APP_NAME}
+install -m 644 ${SOURCE_ROOT}/${OUTPUT_DIR}/${APP_NAME}.desktop %{buildroot}/usr/share/applications/${APP_NAME}.desktop
+install -m 644 ${SOURCE_ROOT}/icon.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png
 
 %files
 /usr/bin/${APP_NAME}
