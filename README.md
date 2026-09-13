@@ -20,7 +20,7 @@ The screenshots use blurred chat content to protect personal information.
 
 ## Download
 
-Latest published release: **v1.5.9**
+Latest published release: **v1.5.9.1**
 
 | Platform | Download |
 | --- | --- |
@@ -92,7 +92,7 @@ Default profile locations:
 - Windows: `%APPDATA%\WhatsAppDesk\UserData\`
 - Linux: `~/.config/whatsapp-desk/`
 
-## Unreleased: 1.5.9.1
+## Version 1.5.9.1
 
 - Linux update selection now distinguishes x64 and arm64, preventing an incompatible x64 download on arm64 devices.
 - Release automation builds and publishes macOS, Windows x64, Linux x64, and Linux arm64 from the tagged source version.
