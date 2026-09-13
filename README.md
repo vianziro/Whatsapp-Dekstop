@@ -20,14 +20,14 @@ The screenshots use blurred chat content to protect personal information.
 
 ## Download
 
-Latest published release: **v1.5.9.1**
+Latest published release: **v1.5.9.2**
 
 | Platform | Download |
 | --- | --- |
 | macOS, Apple Silicon and Intel | [DMG](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.dmg) · [ZIP](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.zip) |
 | Windows 10/11 x64 | [EXE](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe) · [ZIP](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Windows-x64.zip) |
 | Debian/Ubuntu x64 | [DEB](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-amd64.deb) · [tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
-| Fedora/RHEL x64 | Use the [portable tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
+| Fedora/RHEL x64 | [RPM](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Fedora-x64.rpm) · [portable tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
 
 Linux arm64 packages will be published starting with v1.5.9.1. The updater only offers an architecture-compatible package; it never substitutes an x64 build on arm64.
 
@@ -91,6 +91,12 @@ Default profile locations:
 - macOS: `~/Library/Application Support/WhatsAppDesk/UserData/`
 - Windows: `%APPDATA%\WhatsAppDesk\UserData\`
 - Linux: `~/.config/whatsapp-desk/`
+
+## Version 1.5.9.2
+
+- Reduced CPU spikes while scrolling by deferring non-essential DOM observers and capping media/spellcheck scan batches.
+- Added local Help & diagnostics with a shortcut reference; it never sends chat data or files.
+- Added Fedora/RHEL x64 RPM packaging alongside the portable Linux archive.
 
 ## Version 1.5.9.1
 

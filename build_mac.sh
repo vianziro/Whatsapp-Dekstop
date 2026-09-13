@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="WhatsApp Desk"
-VERSION="${1:-1.5.9.1}"  # single source of truth: injected via -X main.appVersion below
+VERSION="${1:-1.5.9.2}"  # single source of truth: injected via -X main.appVersion below
 BINARY_NAME="WhatsApp"
 BUNDLE_DIR="${APP_NAME}.app"
 CONTENTS_DIR="${BUNDLE_DIR}/Contents"

@@ -26,7 +26,7 @@ type UIController interface {
 // builds override it with -ldflags "-X main.appVersion=X.Y.Z[.N]"; the literal
 // here is only the development fallback. UI strings must never hardcode a
 // version — they use the __WA_APP_VERSION__ placeholder replaced at runtime.
-var appVersion = "1.5.9.1"
+var appVersion = "1.5.9.2"
 
 const githubRepo = "vianziro/Whatsapp-Dekstop"
 

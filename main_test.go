@@ -159,6 +159,19 @@ func TestHiddenWindowRequestsNativeMemoryRelease(t *testing.T) {
 	}
 }
 
+func TestBackgroundEnhancementsYieldDuringScrolling(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"waBackgroundWorkBusyUntil", "markBackgroundWorkBusy",
+		"window.addEventListener('wheel', markBackgroundWorkBusy", "Date.now() < waBackgroundWorkBusyUntil",
+		"pendingMediaRoots.length >= 24", "pendingSpellRoots.length < 12",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("performance guard is missing %q", want)
+		}
+	}
+}
+
 func TestSettingsControlsRemainWired(t *testing.T) {
 	script := getInitScript("test-agent")
 	ids := []string{
@@ -166,6 +179,7 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 		"wa-action-toggle-priv", "wa-action-toggle-pin", "wa-action-toggle-mute", "wa-action-toggle-auto",
 		"wa-btn-change-folder", "wa-btn-open-folder", "wa-btn-reset-folder",
 		"wa-btn-check-updates-modal", "wa-btn-reload-modal", "wa-btn-hardref-modal", "wa-btn-onboard-modal",
+		"wa-btn-run-diagnostics", "wa-btn-show-shortcuts",
 	}
 	for _, id := range ids {
 		if strings.Count(script, `id="`+id+`"`) != 1 {
@@ -173,6 +187,19 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 		}
 		if !strings.Contains(script, "getElementById('"+id+"')") {
 			t.Errorf("control %s has no event or state binding", id)
+		}
+	}
+}
+
+func TestSettingsHelpUsesLocalDiagnosticsAndDocumentsShortcuts(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"Help & diagnostics", "Run quick check", "View keyboard shortcuts",
+		"Native bridge: ready", "Local settings storage: ready",
+		"getDownloadDirNative", "checkForUpdateNative", "isMac ? 'Cmd' : 'Ctrl'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("settings help is missing %q", want)
 		}
 	}
 }

@@ -55,8 +55,20 @@ func getInitScript(ua string) string {
 		// boot and left the app stuck on the splash screen. Do not re-add a
 		// meta CSP without a report-only phase first.
 
+		// WhatsApp's virtualized lists can emit hundreds of DOM mutations while the
+		// user scrolls. Our enhancements are non-critical during that gesture, so
+		// defer them briefly instead of competing with WebKit's renderer. This is
+		// deliberately a shared gate: observers keep their correctness but never
+		// create a second rendering workload during fast scrolling.
+		var waBackgroundWorkBusyUntil = 0;
+		function markBackgroundWorkBusy() {
+			waBackgroundWorkBusyUntil = Date.now() + 350;
+		}
+		window.addEventListener('scroll', markBackgroundWorkBusy, { passive: true, capture: true });
+		window.addEventListener('wheel', markBackgroundWorkBusy, { passive: true, capture: true });
+		window.addEventListener('touchmove', markBackgroundWorkBusy, { passive: true, capture: true });
 		function shouldPauseBackgroundWork() {
-			return document.hidden === true;
+			return document.hidden === true || Date.now() < waBackgroundWorkBusyUntil;
 		}
 
 		// Emulate navigator.userAgentData (User-Agent Client Hints)
@@ -181,7 +193,13 @@ func getInitScript(ua string) string {
 				var mediaScanScheduled = false;
 				var pendingMediaRoots = [];
 				function queueMediaRoot(node) {
-					if (node && node.nodeType === 1) pendingMediaRoots.push(node);
+					if (!node || node.nodeType !== 1 || pendingMediaRoots.length >= 24) return;
+					try {
+						if ((node.matches && node.matches('video, audio')) ||
+							(node.querySelector && node.querySelector('video, audio'))) {
+							pendingMediaRoots.push(node);
+						}
+					} catch (e) {}
 				}
 				function scanForUnpreparedMedia() {
 					mediaScanScheduled = false;
@@ -1890,9 +1908,9 @@ func getInitScript(ua string) string {
 				}
 				var observer = new MutationObserver(function(mutations) {
 					if (shouldPauseBackgroundWork()) return;
-					for (var i = 0; i < mutations.length; i++) {
+					for (var i = 0; i < mutations.length && pendingSpellRoots.length < 12; i++) {
 						var added = mutations[i].addedNodes;
-						for (var j = 0; j < added.length; j++) {
+						for (var j = 0; j < added.length && pendingSpellRoots.length < 12; j++) {
 							if (spellCheckRelevant(added[j])) pendingSpellRoots.push(added[j]);
 						}
 					}
@@ -2886,6 +2904,22 @@ func getInitScript(ua string) string {
 					'</div>';
 				modal.appendChild(actionsSection);
 
+				// Section 4: Help & local diagnostics. This intentionally performs no
+				// network request and never reads chat data; it only validates the
+				// small native bridge surface used by the application.
+				var helpSection = document.createElement('div');
+				helpSection.className = 'wa-modal-card';
+				helpSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+				helpSection.innerHTML = '' +
+					'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
+					'  <div><strong class="wa-text-primary" style="font-size:12.5px;">Help & diagnostics</strong><div class="wa-text-muted" style="font-size:11px;margin-top:2px;">Check the app surface locally. No chats or files are sent.</div></div>' +
+					'  <button id="wa-btn-run-diagnostics" class="wa-card-btn" style="padding:6px 10px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;white-space:nowrap;">Run quick check</button>' +
+					'</div>' +
+					'<div id="wa-diagnostics-result" class="wa-text-muted" aria-live="polite" style="display:none;font-size:10.5px;line-height:1.45;border-radius:6px;padding:7px 8px;"></div>' +
+					'<button id="wa-btn-show-shortcuts" style="align-self:flex-start;background:transparent;border:none;color:#00a884;font-size:11px;cursor:pointer;padding:2px 0;">View keyboard shortcuts</button>' +
+					'<div id="wa-shortcuts-list" class="wa-text-muted" style="display:none;font-size:10.5px;line-height:1.65;"></div>';
+				modal.appendChild(helpSection);
+
 				// Disclaimer
 				var disclaimer = document.createElement('div');
 				disclaimer.className = 'wa-text-muted';
@@ -3121,6 +3155,44 @@ func getInitScript(ua string) string {
 					closeSettings();
 					if (window.showOnboardingModal) window.showOnboardingModal();
 				};
+
+				var shortcutsBtn = document.getElementById('wa-btn-show-shortcuts');
+				var shortcutsList = document.getElementById('wa-shortcuts-list');
+				if (shortcutsBtn && shortcutsList) {
+					var modifier = isMac ? 'Cmd' : 'Ctrl';
+					shortcutsList.innerHTML =
+						'<div><strong class="wa-text-primary">' + modifier + '+,</strong> &mdash; Settings &amp; Controls</div>' +
+						'<div><strong class="wa-text-primary">' + modifier + '+Shift+D</strong> &mdash; Open downloads folder</div>' +
+						'<div><strong class="wa-text-primary">' + modifier + '+Shift+U</strong> &mdash; Check for updates</div>' +
+						'<div><strong class="wa-text-primary">' + modifier + '+Shift+P / T / M / S</strong> &mdash; Privacy / on top / mute / startup</div>' +
+						'<div><strong class="wa-text-primary">Esc</strong> &mdash; Close this window</div>';
+					shortcutsBtn.onclick = function() {
+						var open = shortcutsList.style.display !== 'none';
+						shortcutsList.style.display = open ? 'none' : 'block';
+						shortcutsBtn.textContent = open ? 'View keyboard shortcuts' : 'Hide keyboard shortcuts';
+					};
+				}
+
+				var diagnosticsBtn = document.getElementById('wa-btn-run-diagnostics');
+				var diagnosticsResult = document.getElementById('wa-diagnostics-result');
+				if (diagnosticsBtn && diagnosticsResult) {
+					diagnosticsBtn.onclick = function() {
+						var checks = [];
+						var requiredBindings = ['getDownloadDirNative', 'openDownloadDirNative', 'checkForUpdateNative', 'checkFileExistsNative'];
+						var missing = requiredBindings.filter(function(name) { return typeof window[name] !== 'function'; });
+						checks.push(missing.length ? 'Native bridge: unavailable (' + missing.join(', ') + ')' : 'Native bridge: ready');
+						checks.push(navigator.onLine === false ? 'Network: offline (chat may not refresh)' : 'Network: available');
+						try {
+							var key = 'wa-desk-diagnostic-probe';
+							localStorage.setItem(key, '1'); localStorage.removeItem(key);
+							checks.push('Local settings storage: ready');
+						} catch (e) { checks.push('Local settings storage: unavailable'); }
+						var healthy = !missing.length && navigator.onLine !== false;
+						diagnosticsResult.style.display = 'block';
+						diagnosticsResult.style.background = healthy ? 'rgba(0,168,132,.10)' : 'rgba(234,0,56,.10)';
+						diagnosticsResult.innerHTML = '<strong class="wa-text-primary">' + (healthy ? 'Quick check complete' : 'Attention needed') + '</strong><br>' + checks.map(function(line) { return '• ' + line; }).join('<br>');
+					};
+				}
 
 				// Populate current download dir
 				var pathLabel = document.getElementById('wa-folder-path');

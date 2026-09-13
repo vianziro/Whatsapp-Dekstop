@@ -3,7 +3,7 @@ set -e
 
 APP_NAME="whatsapp-desk"
 DISPLAY_NAME="WhatsApp Desk"
-VERSION="${1:-${WA_DESK_VERSION:-1.5.9.1}}"
+VERSION="${1:-${WA_DESK_VERSION:-1.5.9.2}}"
 OUTPUT_DIR="dist_linux"
 
 # Derive the target architecture from the Go toolchain instead of hardcoding it.
@@ -96,6 +96,45 @@ EOF
     cp "whatsapp-desk_${VERSION}_${DEB_ARCH}.deb" "WhatsApp-Desk-Linux-${DEB_ARCH}.deb"
     rm -rf "${DEB_DIR}"
     echo "Created: whatsapp-desk_${VERSION}_${DEB_ARCH}.deb and WhatsApp-Desk-Linux-${DEB_ARCH}.deb"
+fi
+
+# Build a native Fedora/RHEL package when rpmbuild is available. The portable
+# tarball remains the updater payload because it works across both Fedora and
+# Debian-family releases; the RPM is for normal system installation.
+if command -v rpmbuild >/dev/null 2>&1; then
+    echo "Building Fedora/RHEL package (.rpm)..."
+    RPM_TOPDIR="${PWD}/rpmbuild"
+    rm -rf "${RPM_TOPDIR}"
+    mkdir -p "${RPM_TOPDIR}/BUILDROOT" "${RPM_TOPDIR}/RPMS" "${RPM_TOPDIR}/SPECS"
+    cat > "${RPM_TOPDIR}/SPECS/${APP_NAME}.spec" << EOF
+Name:           ${APP_NAME}
+Version:        ${VERSION}
+Release:        1%{?dist}
+Summary:        Lightweight WhatsApp desktop client
+License:        MIT
+BuildArch:      $( [ "${GOARCH_VALUE}" = "arm64" ] && echo aarch64 || echo x86_64 )
+Requires:       gtk3
+Requires:       webkit2gtk4.1
+
+%description
+Independent WhatsApp desktop client built with Go and the native WebKit engine.
+
+%install
+mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/applications %{buildroot}/usr/share/icons/hicolor/512x512/apps
+install -m 755 ${OUTPUT_DIR}/${APP_NAME} %{buildroot}/usr/bin/${APP_NAME}
+install -m 644 ${OUTPUT_DIR}/${APP_NAME}.desktop %{buildroot}/usr/share/applications/${APP_NAME}.desktop
+install -m 644 icon.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png
+
+%files
+/usr/bin/${APP_NAME}
+/usr/share/applications/${APP_NAME}.desktop
+/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png
+EOF
+    rpmbuild -bb "${RPM_TOPDIR}/SPECS/${APP_NAME}.spec" --define "_topdir ${RPM_TOPDIR}"
+    RPM_ARCH="$( [ "${GOARCH_VALUE}" = "arm64" ] && echo aarch64 || echo x86_64 )"
+    cp "${RPM_TOPDIR}/RPMS/${RPM_ARCH}/${APP_NAME}-${VERSION}-1"*.rpm "WhatsApp-Desk-Fedora-${BUNDLE_ARCH}.rpm"
+    rm -rf "${RPM_TOPDIR}"
+    echo "Created: WhatsApp-Desk-Fedora-${BUNDLE_ARCH}.rpm"
 fi
 
 echo "Done! Linux artifacts ready in ${OUTPUT_DIR} and ${TAR_BUNDLE}."
