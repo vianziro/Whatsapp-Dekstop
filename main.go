@@ -460,23 +460,43 @@ func getInitScript(ua string) string {
 
 		// Drag & Drop file upload to chat
 		(function() {
-			var dropZone = null;
+			// WhatsApp Web replaces #main while switching chats. Install the
+			// handlers once on document so a replaced conversation pane cannot
+			// silently lose drag-and-drop support.
+			if (window.__waDragDropInstalled) return;
+			window.__waDragDropInstalled = true;
 			var dragCounter = 0;
+			var dropInProgress = false;
 
 			function getDropZone() {
 				// WhatsApp Web's main chat area where files can be dropped
 				return document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel"]') || document.body;
 			}
 
+			function isFileDrag(e) {
+				var types = e && e.dataTransfer && e.dataTransfer.types;
+				if (!types) return false;
+				for (var i = 0; i < types.length; i++) {
+					if (types[i] === 'Files' || types[i] === 'application/x-moz-file') return true;
+				}
+				return false;
+			}
+
+			function isChatDrop(e) {
+				var target = e && e.target;
+				return !!(target && target.closest && target.closest('#main, [data-testid="conversation-panel"]'));
+			}
+
 			function handleDragEnter(e) {
+				if (!isFileDrag(e) || !isChatDrop(e)) return;
 				dragCounter++;
 				e.preventDefault();
-				e.stopPropagation();
 				var dz = getDropZone();
 				if (dz) dz.classList.add('wa-drag-over');
 			}
 
 			function handleDragLeave(e) {
+				if (!isFileDrag(e)) return;
 				dragCounter--;
 				if (dragCounter <= 0) {
 					dragCounter = 0;
@@ -486,68 +506,74 @@ func getInitScript(ua string) string {
 			}
 
 			function handleDragOver(e) {
+				if (!isFileDrag(e) || !isChatDrop(e)) return;
 				e.preventDefault();
-				e.stopPropagation();
-				e.dataTransfer.dropEffect = 'copy';
+				if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
 			}
 
-			async function handleDrop(e) {
+			function findFileInput() {
+				var inputs = document.querySelectorAll('input[type="file"]');
+				var fallback = null;
+				for (var i = inputs.length - 1; i >= 0; i--) {
+					var input = inputs[i];
+					if (!fallback) fallback = input;
+					if (!input.files || input.files.length === 0) return input;
+				}
+				return fallback;
+			}
+
+			function setFilesOnInput(fileInput, files) {
+				if (!fileInput || !files || files.length === 0) return false;
+				try {
+					var dt = new DataTransfer();
+					for (var i = 0; i < files.length; i++) dt.items.add(files[i]);
+					fileInput.files = dt.files;
+					if (!fileInput.files || fileInput.files.length !== files.length) return false;
+					fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+					fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+					return true;
+				} catch (err) {
+					return false;
+				}
+			}
+
+			function findAttachButton() {
+				return document.querySelector('[data-testid="clip"], [data-icon="clip"], [aria-label*="Attach" i], [aria-label*="Lampirkan" i]');
+			}
+
+			function injectFiles(files, attempt) {
+				var fileInput = findFileInput();
+				if (fileInput && setFilesOnInput(fileInput, files)) return true;
+				// The attach menu/input is created asynchronously by WhatsApp. Keep
+				// trying briefly instead of relying on a single 100ms timer.
+				if (attempt < 30) {
+					setTimeout(function() { injectFiles(files, attempt + 1); }, 40);
+				}
+				return false;
+			}
+
+			function handleDrop(e) {
+				if (!isFileDrag(e) || !isChatDrop(e) || dropInProgress) return;
 				e.preventDefault();
-				e.stopPropagation();
+				e.stopImmediatePropagation();
 				dragCounter = 0;
 				var dz = getDropZone();
 				if (dz) dz.classList.remove('wa-drag-over');
 
-				var files = e.dataTransfer.files;
+				// Snapshot the File objects before returning from the native drop event.
+				var files = Array.prototype.slice.call(e.dataTransfer.files || []);
 				if (!files || files.length === 0) return;
-
-				// Find the file input for the attach menu
-				var attachBtn = document.querySelector('[data-testid="clip"], [data-icon="clip"], [aria-label*="Attach"], [aria-label*="Lampirkan"]');
-				if (attachBtn) {
-					attachBtn.click();
-					// Wait for the file input to appear
-					setTimeout(function() {
-						var fileInput = document.querySelector('input[type="file"][accept*="*"], input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"][accept*="document"], input[type="file"][accept*="audio"]');
-						if (fileInput && fileInput.files.length === 0) {
-							// Create a DataTransfer to set files on the input
-							var dt = new DataTransfer();
-							for (var i = 0; i < files.length; i++) {
-								dt.items.add(files[i]);
-							}
-							fileInput.files = dt.files;
-							// Trigger change event
-							var event = new Event('change', { bubbles: true });
-							fileInput.dispatchEvent(event);
-						}
-					}, 100);
-				}
+				dropInProgress = true;
+				var attachBtn = findAttachButton();
+				if (attachBtn) attachBtn.click();
+				injectFiles(files, 0);
+				setTimeout(function() { dropInProgress = false; }, 1500);
 			}
 
-			function initDragDrop() {
-				var dz = getDropZone();
-				if (dz) {
-					dz.addEventListener('dragenter', handleDragEnter, true);
-					dz.addEventListener('dragleave', handleDragLeave, true);
-					dz.addEventListener('dragover', handleDragOver, true);
-					dz.addEventListener('drop', handleDrop, true);
-				}
-			}
-
-			// Initialize when DOM is ready
-			if (document.readyState === 'loading') {
-				document.addEventListener('DOMContentLoaded', initDragDrop);
-			} else {
-				initDragDrop();
-			}
-
-			// Re-initialize on navigation (WhatsApp Web is SPA)
-			var lastUrl = location.href;
-			setInterval(function() {
-				if (location.href !== lastUrl) {
-					lastUrl = location.href;
-					setTimeout(initDragDrop, 500);
-				}
-			}, 1000);
+			document.addEventListener('dragenter', handleDragEnter, true);
+			document.addEventListener('dragleave', handleDragLeave, true);
+			document.addEventListener('dragover', handleDragOver, true);
+			document.addEventListener('drop', handleDrop, true);
 		})();
 
 		// Helper: Decode base64 dataURI to Uint8Array
@@ -1027,48 +1053,12 @@ func getInitScript(ua string) string {
 		}
 		window.showInAppDocModal = showInAppDocModal;
 
-		// Intercept URL.createObjectURL to catch decrypted PDF/document blobs directly
+		// Do not inspect or save every document blob created by WhatsApp Web.
+		// Opening/uploading a document also creates preview blobs; treating those
+		// blobs as downloads caused duplicate "Document (1).ext" files and an
+		// unwanted native preview. Downloads are handled only by the explicit
+		// download-anchor/button hooks below.
 		var origCreateObjectURL = URL.createObjectURL;
-		URL.createObjectURL = function(blob) {
-			var url = origCreateObjectURL.apply(this, arguments);
-			try {
-				var bType = (blob && blob.type) ? blob.type.toLowerCase() : '';
-				var isDocBlob = bType.indexOf('pdf') >= 0 || bType.indexOf('officedocument') >= 0 ||
-					bType.indexOf('msword') >= 0 || bType.indexOf('ms-excel') >= 0 ||
-					bType.indexOf('spreadsheet') >= 0 || bType.indexOf('wordprocessing') >= 0 ||
-					bType === 'text/csv' || bType === 'text/plain' ||
-					(blob && (blob.type === 'application/octet-stream' || bType === '') && isRecentPDFIntent());
-
-				if (blob && isDocBlob) {
-					var name = lastClickedDocName || 'document';
-					if (!name.includes('.')) {
-						if (bType.indexOf('pdf') >= 0) name += '.pdf';
-						else if (bType.indexOf('sheet') >= 0 || bType.indexOf('excel') >= 0) name += '.xlsx';
-						else if (bType.indexOf('word') >= 0) name += '.docx';
-						else name += '.pdf';
-					}
-					var isPdf = name.toLowerCase().endsWith('.pdf');
-					var previewBlob = isPdf ? blob.slice(0, blob.size, 'application/pdf') : blob;
-					var ownedBlobUrl = isPdf ? origCreateObjectURL(previewBlob) : '';
-					var reader = new FileReader();
-					reader.onloadend = function() {
-						var base64data = reader.result;
-						if (window.saveDownloadedFileNative) {
-							window.saveDownloadedFileNative(name, base64data).then(function(savedPath) {
-								showInAppDocModal(name, ownedBlobUrl, savedPath, base64data, ownedBlobUrl);
-								dismissStuckViewer();
-								showFloatingToast('📄 Document preview: ' + name);
-							});
-						} else {
-							showInAppDocModal(name, ownedBlobUrl, '', base64data, ownedBlobUrl);
-							dismissStuckViewer();
-						}
-					};
-					reader.readAsDataURL(blob);
-				}
-			} catch (e) {}
-			return url;
-		};
 
 		function handleBlobDocumentPreview(blobUrl) {
 			var name = lastClickedDocName || 'document.pdf';
@@ -2109,7 +2099,8 @@ func getInitScript(ua string) string {
 				if (!filename) filename = 'whatsapp_file';
 				var isDoc = isDocumentFileName(filename);
 				if (shouldAutoOpen === undefined) {
-					shouldAutoOpen = isDoc;
+					// An explicit download should save the file, not unexpectedly open it.
+					shouldAutoOpen = false;
 				}
 				var requestKey = downloadRequestKey(href, filename);
 				var existingRequest = activeDownloadKeys[requestKey];
@@ -2298,61 +2289,11 @@ func getInitScript(ua string) string {
 				if (clickedDoc) {
 					lastClickedDocName = foundName;
 					lastDocumentIntentAt = Date.now();
-					if (isDocumentFileName(foundName)) {
-						var directDownload = findDocumentDownloadControl(el);
-						if (directDownload && !directDownload.contains(el)) {
-							e.preventDefault();
-							e.stopImmediatePropagation();
-							forwardingDocumentDownload = true;
-							directDownload.click();
-							forwardingDocumentDownload = false;
-							return;
-						}
-					}
-
-					var checkCount = 0;
-					var checkTimer = setInterval(function() {
-						if (shouldPauseBackgroundWork()) {
-							clearInterval(checkTimer);
-							return;
-						}
-						checkCount++;
-						if (checkCount > 30) {
-							clearInterval(checkTimer);
-							return;
-						}
-
-						if (triggerVisibleViewerDownload()) {
-							clearInterval(checkTimer);
-						}
-					}, 200);
 				}
 			}, true);
 
-			// Hook 4: MutationObserver to auto-dismiss stuck media viewer and trigger download/preview.
-			// This observes the whole document body (subtree), which also churns heavily while
-			// the chat list is scrolled, so coalesce to at most one check per animation frame
-			// instead of running on every individual mutation batch.
-			var viewerCheckScheduled = false;
-			var viewerObserver = new MutationObserver(function() {
-				if (shouldPauseBackgroundWork() || !isRecentPDFIntent() || viewerCheckScheduled) return;
-				viewerCheckScheduled = true;
-				requestAnimationFrame(function() {
-					viewerCheckScheduled = false;
-					if (!isRecentPDFIntent()) return;
-					if (!document.getElementById('wa-doc-modal-overlay')) triggerVisibleViewerDownload();
-				});
-			});
-
-			function initViewerObserver() {
-				var target = document.body || document.documentElement;
-				if (target) {
-					viewerObserver.observe(target, { childList: true, subtree: true });
-				} else {
-					document.addEventListener('DOMContentLoaded', initViewerObserver, { once: true });
-				}
-			}
-			initViewerObserver();
+			// No observer is needed here: a document click must not synthesize a
+			// second click on WhatsApp's download control.
 		})();
 
 		// "Saved to disk" badges on the Media/Docs panel. WhatsApp has no notion
