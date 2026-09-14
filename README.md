@@ -28,6 +28,7 @@ Latest published release: **v1.5.9.2**
 | Windows 10/11 x64 | [EXE](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe) · [ZIP](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Windows-x64.zip) |
 | Debian/Ubuntu x64 | [DEB](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-amd64.deb) · [tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
 | Fedora/RHEL x64 | [RPM](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Fedora-x64.rpm) · [portable tar.gz](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) |
+| Linux (Universal) | [AppImage](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.AppImage) |
 
 Linux arm64 packages will be published starting with v1.5.9.1. The updater only offers an architecture-compatible package; it never substitutes an x64 build on arm64.
 
@@ -66,7 +67,14 @@ sudo dpkg -i WhatsApp-Desk-Linux-amd64.deb
 sudo apt-get install -f
 ```
 
-The portable archive requires GTK 3 and WebKitGTK 4.0 or 4.1.
+### AppImage (Universal Linux)
+
+```bash
+chmod +x WhatsApp-Desk-Linux-x64.AppImage
+./WhatsApp-Desk-Linux-x64.AppImage
+```
+
+The portable archive and AppImage require GTK 3 and WebKitGTK 4.0 or 4.1.
 
 ## Shortcuts
 

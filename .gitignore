@@ -16,6 +16,8 @@ whatsapp-desktop
 # Generated build output and local tooling state
 *.rpm
 *.deb
+*.AppImage
+*.tar.gz
 dist_linux*/
 rpms*/
 .gocache/

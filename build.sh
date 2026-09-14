@@ -21,6 +21,11 @@ build_linux() {
     bash build_linux.sh "${VERSION}"
 }
 
+build_appimage() {
+    echo "=== Linux (AppImage) ==="
+    bash build_linux.sh "${VERSION}"
+}
+
 build_windows() {
     echo "=== Windows (x64) ==="
     if [ "$(uname -s)" != "MINGW"* ] && [ "$(uname -s)" != "MSYS"* ] && [ "${GOOS:-}" != "windows" ]; then
@@ -44,7 +49,22 @@ build_windows() {
         go build -ldflags="-H windowsgui -X main.appVersion=${VERSION}" \
         -trimpath -o WhatsAppDesk.exe .
     rm -f WhatsApp-Desk-Windows-x64.zip
-    zip -q WhatsApp-Desk-Windows-x64.zip WhatsAppDesk.exe
+    if command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -Command \
+            "Compress-Archive -Path 'WhatsAppDesk.exe' -DestinationPath 'WhatsApp-Desk-Windows-x64.zip' -Force"
+    elif command -v pwsh >/dev/null 2>&1; then
+        pwsh -NoProfile -Command \
+            "Compress-Archive -Path 'WhatsAppDesk.exe' -DestinationPath 'WhatsApp-Desk-Windows-x64.zip' -Force"
+    elif command -v zip >/dev/null 2>&1; then
+        zip -q WhatsApp-Desk-Windows-x64.zip WhatsAppDesk.exe
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -m zipfile -c WhatsApp-Desk-Windows-x64.zip WhatsAppDesk.exe
+    elif command -v python >/dev/null 2>&1; then
+        python -m zipfile -c WhatsApp-Desk-Windows-x64.zip WhatsAppDesk.exe
+    else
+        echo "Error: No suitable tool (PowerShell, zip, or Python) found to create zip archive."
+        exit 1
+    fi
     echo "Created: WhatsAppDesk.exe and WhatsApp-Desk-Windows-x64.zip"
 }
 
@@ -96,6 +116,7 @@ DOCKER_EOF
 case "${TARGET}" in
     mac)      build_mac ;;
     linux)    build_linux ;;
+    appimage) build_appimage ;;
     windows)  build_windows ;;
     check)    check_all ;;
     all)
@@ -106,7 +127,7 @@ case "${TARGET}" in
             *) echo "Unknown host $(uname -s); run with an explicit target."; exit 1 ;;
         esac
         ;;
-    *) echo "Usage: $0 [mac|linux|windows|all|check] [version]"; exit 1 ;;
+    *) echo "Usage: $0 [mac|linux|appimage|windows|all|check] [version]"; exit 1 ;;
 esac
 
 echo "Done! (version ${VERSION})"

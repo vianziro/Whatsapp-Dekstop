@@ -157,4 +157,118 @@ EOF
     echo "Created: WhatsApp-Desk-Fedora-${BUNDLE_ARCH}.rpm"
 fi
 
+# Build AppImage package if not skipped
+if [ "${WA_DESK_SKIP_APPIMAGE:-0}" != "1" ]; then
+    case "${GOARCH_VALUE}" in
+        amd64|"") APPIMAGE_ARCH="x86_64" ;;
+        arm64)    APPIMAGE_ARCH="aarch64" ;;
+        386)      APPIMAGE_ARCH="i686" ;;
+        arm)      APPIMAGE_ARCH="armhf" ;;
+        *)        APPIMAGE_ARCH="${GOARCH_VALUE}" ;;
+    esac
+
+    APPIMAGE_BUNDLE="WhatsApp-Desk-Linux-${BUNDLE_ARCH}.AppImage"
+    echo "Building AppImage (${APPIMAGE_BUNDLE})..."
+
+    APPDIR="${PWD}/dist_linux_appdir"
+    rm -rf "${APPDIR}"
+    mkdir -p "${APPDIR}/usr/bin" \
+             "${APPDIR}/usr/share/applications" \
+             "${APPDIR}/usr/share/icons/hicolor/512x512/apps" \
+             "${APPDIR}/usr/share/metainfo"
+
+    cp "${OUTPUT_DIR}/${APP_NAME}" "${APPDIR}/usr/bin/${APP_NAME}"
+    chmod 755 "${APPDIR}/usr/bin/${APP_NAME}"
+
+    cp "${OUTPUT_DIR}/${APP_NAME}.desktop" "${APPDIR}/"
+    cp "${OUTPUT_DIR}/${APP_NAME}.desktop" "${APPDIR}/usr/share/applications/"
+    chmod 644 "${APPDIR}/${APP_NAME}.desktop" "${APPDIR}/usr/share/applications/${APP_NAME}.desktop"
+
+    cp icon.png "${APPDIR}/${APP_NAME}.png"
+    cp icon.png "${APPDIR}/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png"
+    ln -sf "${APP_NAME}.png" "${APPDIR}/.DirIcon"
+
+    cat << EOF > "${APPDIR}/usr/share/metainfo/${APP_NAME}.appdata.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>${APP_NAME}.desktop</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>${DISPLAY_NAME}</name>
+  <summary>Lightweight WhatsApp Desktop Client</summary>
+  <description>
+    <p>
+      WhatsApp Desk is a lightweight, independent desktop wrapper for WhatsApp Web
+      built with Go and native WebKit engine.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/vianziro/Whatsapp-Dekstop</url>
+  <provides>
+    <binary>${APP_NAME}</binary>
+  </provides>
+  <launchable type="desktop-id">${APP_NAME}.desktop</launchable>
+</component>
+EOF
+
+    cat << 'EOF' > "${APPDIR}/AppRun"
+#!/bin/sh
+set -e
+HERE="$(dirname "$(readlink -f "${0}")")"
+export APPDIR="${HERE}"
+export PATH="${HERE}/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec "${HERE}/usr/bin/whatsapp-desk" "$@"
+EOF
+    chmod +x "${APPDIR}/AppRun"
+
+    TOOL_CMD=""
+    if command -v appimagetool >/dev/null 2>&1; then
+        TOOL_CMD="appimagetool"
+    elif [ -n "${WA_DESK_APPIMAGE_TOOL:-}" ] && [ -x "${WA_DESK_APPIMAGE_TOOL}" ]; then
+        TOOL_CMD="${WA_DESK_APPIMAGE_TOOL}"
+    else
+        TOOL_DIR="${HOME}/.cache/appimage"
+        TOOL_BIN="${TOOL_DIR}/appimagetool-${APPIMAGE_ARCH}.AppImage"
+        mkdir -p "${TOOL_DIR}"
+        if [ ! -f "${TOOL_BIN}" ]; then
+            echo "Downloading appimagetool (${APPIMAGE_ARCH})..."
+            TOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${APPIMAGE_ARCH}.AppImage"
+            if command -v curl >/dev/null 2>&1; then
+                curl -sSL -o "${TOOL_BIN}" "${TOOL_URL}" || rm -f "${TOOL_BIN}"
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O "${TOOL_BIN}" "${TOOL_URL}" || rm -f "${TOOL_BIN}"
+            fi
+        fi
+        if [ -f "${TOOL_BIN}" ]; then
+            chmod +x "${TOOL_BIN}"
+            TOOL_CMD="${TOOL_BIN}"
+        fi
+    fi
+
+    if [ -n "${TOOL_CMD}" ]; then
+        RUNTIME_ARG=()
+        RUNTIME_CACHE="${HOME}/.cache/appimage/runtime-${APPIMAGE_ARCH}"
+        if [ ! -f "${RUNTIME_CACHE}" ] && [ -w "${HOME}/.cache/appimage" ]; then
+            RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${APPIMAGE_ARCH}"
+            if command -v curl >/dev/null 2>&1; then
+                curl -sSL -o "${RUNTIME_CACHE}" "${RUNTIME_URL}" 2>/dev/null || rm -f "${RUNTIME_CACHE}"
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O "${RUNTIME_CACHE}" "${RUNTIME_URL}" 2>/dev/null || rm -f "${RUNTIME_CACHE}"
+            fi
+        fi
+        if [ -f "${RUNTIME_CACHE}" ]; then
+            RUNTIME_ARG=("--runtime-file" "${RUNTIME_CACHE}")
+        fi
+
+        ARCH="${APPIMAGE_ARCH}" APPIMAGE_EXTRACT_AND_RUN=1 "${TOOL_CMD}" -n "${RUNTIME_ARG[@]}" "${APPDIR}" "${APPIMAGE_BUNDLE}"
+        rm -rf "${APPDIR}"
+        cp "${APPIMAGE_BUNDLE}" "${OUTPUT_DIR}/"
+        echo "Created: ${APPIMAGE_BUNDLE} and ${OUTPUT_DIR}/${APPIMAGE_BUNDLE}"
+    else
+        echo "Notice: appimagetool could not be found or downloaded; skipping AppImage build."
+        rm -rf "${APPDIR}"
+    fi
+fi
+
 echo "Done! Linux artifacts ready in ${OUTPUT_DIR} and ${TAR_BUNDLE}."

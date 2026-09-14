@@ -2,13 +2,15 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, without the v prefix"
-        required: true
+        description: "Release version, without the v prefix (optional, defaults to updater.go)"
+        required: false
         type: string
 
 permissions:
@@ -19,15 +21,18 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      is_release: ${{ steps.version.outputs.is_release }}
     steps:
       - uses: actions/checkout@v4
       - id: version
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="${{ inputs.version }}"
+            VERSION="$(sed -n 's/.*var appVersion = "\([^"]*\)".*/\1/p' updater.go)"
           fi
           [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]] || {
             echo "Invalid version: $VERSION"; exit 1;
@@ -36,6 +41,11 @@ jobs:
             echo "updater.go appVersion must match release version ${VERSION}"; exit 1;
           }
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
   macos:
     needs: prepare
@@ -90,6 +100,7 @@ jobs:
           path: |
             WhatsApp-Desk-Linux-x64.tar.gz
             WhatsApp-Desk-Linux-amd64.deb
+            WhatsApp-Desk-Linux-x64.AppImage
 
   linux-arm64:
     needs: prepare
@@ -113,8 +124,10 @@ jobs:
           path: |
             WhatsApp-Desk-Linux-arm64.tar.gz
             WhatsApp-Desk-Linux-arm64.deb
+            WhatsApp-Desk-Linux-arm64.AppImage
 
   publish:
+    if: needs.prepare.outputs.is_release == 'true'
     needs: [prepare, macos, windows, linux-x64, linux-arm64]
     runs-on: ubuntu-latest
     steps:
@@ -134,5 +147,7 @@ jobs:
             release-assets/WhatsApp-Desk-macOS-Universal.zip
             release-assets/WhatsApp-Desk-Linux-x64.tar.gz
             release-assets/WhatsApp-Desk-Linux-amd64.deb
+            release-assets/WhatsApp-Desk-Linux-x64.AppImage
             release-assets/WhatsApp-Desk-Linux-arm64.tar.gz
             release-assets/WhatsApp-Desk-Linux-arm64.deb
+            release-assets/WhatsApp-Desk-Linux-arm64.AppImage
