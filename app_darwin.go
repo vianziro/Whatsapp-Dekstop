@@ -170,17 +170,19 @@ static void triggerNativeMemoryPurge(void) {
 
 static void postNativeMacNotification(const char* titleStr, const char* bodyStr) {
     @autoreleasepool {
-        NSUserNotification *notification = [[NSUserNotification alloc] init];
-        if (titleStr && strlen(titleStr) > 0) {
-            notification.title = [NSString stringWithUTF8String:titleStr];
-        } else {
-            notification.title = @"WhatsApp Desk";
-        }
-        if (bodyStr && strlen(bodyStr) > 0) {
-            notification.informativeText = [NSString stringWithUTF8String:bodyStr];
-        }
-        notification.soundName = NSUserNotificationDefaultSoundName;
-        [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
+        // AppKit notification delivery must happen on the main thread. Copy the
+        // strings before dispatching because the C buffers belong to the caller.
+        NSString *title = (titleStr && strlen(titleStr) > 0)
+            ? [NSString stringWithUTF8String:titleStr] : @"WhatsApp Desk";
+        NSString *body = (bodyStr && strlen(bodyStr) > 0)
+            ? [NSString stringWithUTF8String:bodyStr] : @"";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSUserNotification *notification = [[NSUserNotification alloc] init];
+            notification.title = title;
+            notification.informativeText = body;
+            notification.soundName = NSUserNotificationDefaultSoundName;
+            [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
+        });
     }
 }
 
