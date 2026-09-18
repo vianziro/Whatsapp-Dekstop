@@ -1810,6 +1810,331 @@ func getInitScript(ua string) string {
 			});
 		})();
 
+		// Native account dock. Docked flush against the far-left edge and pushes
+		// WhatsApp's own content over (rather than floating on top of it), so it
+		// can never cover WhatsApp's own navigation icons.
+		(function() {
+			var dockId = 'wa-account-dock';
+			var modalId = 'wa-account-modal';
+			var dockClass = 'wa-desk-has-account-dock';
+			var switchingId = null;
+			var refreshSequence = 0;
+			var bridgeRetryCount = 0;
+			var maxBridgeRetries = 20;
+			var maxAccountsUI = 2;
+
+			function hasBridge(name) {
+				return typeof window[name] === 'function';
+			}
+
+			function callBridge(name, args) {
+				if (!hasBridge(name)) return Promise.reject(new Error(name + ' is unavailable'));
+				try {
+					return Promise.resolve(window[name].apply(window, args || []));
+				} catch (err) {
+					return Promise.reject(err);
+				}
+			}
+
+			function isDarkMode() {
+				return document.documentElement.classList.contains('dark') || (document.body && document.body.classList.contains('dark'));
+			}
+
+			function accountLabel(account, index) {
+				var label = account && (account.label || account.name || account.displayName || account.phoneNumber);
+				return String(label || ('Account ' + (index + 1))).trim();
+			}
+
+			function accountInitials(label) {
+				var words = String(label || '').trim().split(/\s+/).filter(Boolean);
+				if (!words.length) return '?';
+				if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+				return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+			}
+
+			function normalizeAccounts(value) {
+				var source = Array.isArray(value) ? value : (value && Array.isArray(value.accounts) ? value.accounts : []);
+				return source.slice(0, maxAccountsUI).map(function(account, index) {
+					account = account || {};
+					return {
+						id: account.id != null ? account.id : (account.accountId != null ? account.accountId : String(index)),
+						label: accountLabel(account, index),
+						active: !!(account.active || account.isActive || account.current)
+					};
+				});
+			}
+
+			function ensureDockStyle() {
+				if (document.getElementById('wa-account-dock-style')) return;
+				var style = document.createElement('style');
+				style.id = 'wa-account-dock-style';
+				style.textContent =
+					'html.' + dockClass + ' #app { margin-left: 64px !important; width: calc(100% - 64px) !important; }' +
+					'#' + dockId + ' { position: fixed; top: 0; left: 0; bottom: 0; width: 64px; z-index: 2147483000; display: flex; flex-direction: column; align-items: center; padding: 40px 0 16px; box-sizing: border-box; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }' +
+					'#' + dockId + ' .wa-dock-scroll { display: flex; flex-direction: column; align-items: center; gap: 10px; overflow-y: auto; max-height: 100%; padding: 2px; }' +
+					'#' + dockId + ' button { flex: none; }' +
+					'#' + dockId + ' button:focus-visible { outline: 2px solid #00a884; outline-offset: 2px; }';
+				(document.head || document.documentElement).appendChild(style);
+			}
+
+			function removeDock() {
+				var existing = document.getElementById(dockId);
+				if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+				document.documentElement.classList.remove(dockClass);
+			}
+
+			function showBridgeUnavailable() {
+				if (window.showFloatingToast) window.showFloatingToast('Account controls are unavailable.');
+			}
+
+			function closeAccountModal() {
+				var overlay = document.getElementById(modalId);
+				if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+			}
+
+			// Replaces window.prompt(), which WKWebView (and WebView2/WebKitGTK) never
+			// actually shows unless the native shell wires up a UI-delegate panel for
+			// it. Without that, prompt() silently returns null, which made Add/Rename
+			// look like a dead click. This modal is pure DOM, so it behaves the same
+			// on every platform with no native dialog support required.
+			function showAccountLabelModal(options) {
+				return new Promise(function(resolve) {
+					closeAccountModal();
+					var dark = isDarkMode();
+					var surface = dark ? '#233138' : '#ffffff';
+					var text = dark ? '#e9edef' : '#111b21';
+					var muted = dark ? '#8696a0' : '#667781';
+					var border = dark ? '#3b4a54' : '#d1d7db';
+					var inputBg = dark ? '#2a3942' : '#f0f2f5';
+
+					var overlay = document.createElement('div');
+					overlay.id = modalId;
+					overlay.style.cssText = 'position:fixed;inset:0;background:rgba(11,20,26,.55);z-index:2147483001;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;opacity:0;transition:opacity 140ms ease;';
+
+					var panel = document.createElement('form');
+					panel.setAttribute('role', 'dialog');
+					panel.setAttribute('aria-modal', 'true');
+					panel.setAttribute('aria-labelledby', modalId + '-title');
+					panel.style.cssText = 'width:320px;max-width:100%;background:' + surface + ';color:' + text + ';border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.35);padding:20px;box-sizing:border-box;';
+
+					var title = document.createElement('h2');
+					title.id = modalId + '-title';
+					title.textContent = options.title;
+					title.style.cssText = 'margin:0 0 12px;font-size:16px;font-weight:600;letter-spacing:-.1px;';
+					panel.appendChild(title);
+
+					var input = document.createElement('input');
+					input.type = 'text';
+					input.value = options.initialValue || '';
+					input.maxLength = 32;
+					input.placeholder = 'e.g. Personal, Work';
+					input.style.cssText = 'width:100%;box-sizing:border-box;background:' + inputBg + ';color:' + text + ';border:1px solid ' + border + ';border-radius:8px;padding:9px 11px;font-size:13px;outline:none;';
+					panel.appendChild(input);
+
+					var hint = document.createElement('p');
+					hint.textContent = 'Up to 32 characters. Shown only on this device.';
+					hint.style.cssText = 'margin:8px 0 0;font-size:11px;line-height:1.5;color:' + muted + ';';
+					panel.appendChild(hint);
+
+					var actions = document.createElement('div');
+					actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:18px;';
+
+					var cancel = document.createElement('button');
+					cancel.type = 'button';
+					cancel.textContent = 'Cancel';
+					cancel.style.cssText = 'background:transparent;border:0;color:' + muted + ';font-size:13px;padding:8px 12px;cursor:pointer;border-radius:6px;';
+
+					var confirmBtn = document.createElement('button');
+					confirmBtn.type = 'submit';
+					confirmBtn.textContent = options.confirmText || 'Save';
+					confirmBtn.style.cssText = 'background:#00a884;border:0;color:#f7f9fa;font-size:13px;font-weight:600;padding:8px 14px;cursor:pointer;border-radius:6px;';
+
+					actions.appendChild(cancel);
+					actions.appendChild(confirmBtn);
+					panel.appendChild(actions);
+
+					function finish(value) {
+						overlay.style.opacity = '0';
+						setTimeout(function() {
+							closeAccountModal();
+							resolve(value);
+						}, 120);
+					}
+
+					panel.addEventListener('submit', function(e) {
+						e.preventDefault();
+						var value = input.value.trim();
+						if (!value) { input.focus(); return; }
+						finish(value);
+					});
+					cancel.onclick = function() { finish(null); };
+					overlay.addEventListener('keydown', function(e) {
+						if (e.key === 'Escape') { e.stopPropagation(); finish(null); }
+					});
+					overlay.addEventListener('mousedown', function(e) {
+						if (e.target === overlay) finish(null);
+					});
+
+					overlay.appendChild(panel);
+					document.body.appendChild(overlay);
+					requestAnimationFrame(function() {
+						overlay.style.opacity = '1';
+						input.focus();
+						input.select();
+					});
+				});
+			}
+
+			function requestSwitch(account) {
+				if (switchingId !== null || !hasBridge('requestAccountSwitchNative')) {
+					if (!hasBridge('requestAccountSwitchNative')) showBridgeUnavailable();
+					return;
+				}
+				switchingId = account.id;
+				renderDock(window.__waAccountRailAccounts || []);
+				callBridge('requestAccountSwitchNative', [account.id]).then(function() {
+					// Native switching may terminate and relaunch the whole process. If it
+					// does not, refresh the active marker before unlocking the dock.
+					return loadAccounts();
+				}).catch(function() {
+					if (window.showFloatingToast) window.showFloatingToast('Unable to switch account.');
+				}).then(function() {
+					switchingId = null;
+					renderDock(window.__waAccountRailAccounts || []);
+				});
+			}
+
+			function renameAccount(account) {
+				if (!hasBridge('renameAccountNative')) {
+					showBridgeUnavailable();
+					return;
+				}
+				showAccountLabelModal({ title: 'Rename account', initialValue: account.label, confirmText: 'Rename' }).then(function(label) {
+					if (label === null) return;
+					return callBridge('renameAccountNative', [account.id, label]).then(loadAccounts).catch(function() {
+						if (window.showFloatingToast) window.showFloatingToast('Unable to rename account.');
+					});
+				});
+			}
+
+			function createAccount() {
+				if (switchingId !== null) return;
+				if (!hasBridge('createAccountNative')) {
+					showBridgeUnavailable();
+					return;
+				}
+				var current = window.__waAccountRailAccounts || [];
+				if (current.length >= maxAccountsUI) {
+					if (window.showFloatingToast) window.showFloatingToast('A maximum of ' + maxAccountsUI + ' accounts is supported.');
+					return;
+				}
+				showAccountLabelModal({ title: 'Add account', confirmText: 'Add' }).then(function(label) {
+					if (label === null) return;
+					return callBridge('createAccountNative', [label]).then(loadAccounts).catch(function() {
+						if (window.showFloatingToast) window.showFloatingToast('Unable to create account.');
+					});
+				});
+			}
+
+			function applyDockTheme(dock) {
+				var dark = isDarkMode();
+				dock.style.background = dark ? '#111b21' : '#f0f2f5';
+				dock.style.borderRight = '1px solid ' + (dark ? 'rgba(134,150,160,.18)' : 'rgba(17,27,33,.10)');
+			}
+
+			function renderDock(accounts) {
+				window.__waAccountRailAccounts = accounts;
+				ensureDockStyle();
+				document.documentElement.classList.add(dockClass);
+
+				var dock = document.getElementById(dockId);
+				if (!dock) {
+					dock = document.createElement('nav');
+					dock.id = dockId;
+					dock.setAttribute('aria-label', 'Accounts');
+					document.documentElement.appendChild(dock);
+				}
+				applyDockTheme(dock);
+				dock.innerHTML = '';
+
+				var scroll = document.createElement('div');
+				scroll.className = 'wa-dock-scroll';
+
+				accounts.forEach(function(account, index) {
+					var isSwitching = switchingId !== null && String(switchingId) === String(account.id);
+					var button = document.createElement('button');
+					button.type = 'button';
+					button.disabled = switchingId !== null;
+					button.setAttribute('aria-label', (account.active ? 'Active account: ' : 'Switch to ') + account.label + '. Double-click to rename.');
+					button.title = account.label + (account.active ? ' (active)' : '') + '\nDouble-click to rename';
+					button.style.cssText = 'position:relative;width:38px;height:38px;padding:0;border-radius:50%;border:2px solid ' + (account.active ? '#00a884' : 'transparent') + ';background:' + (account.active ? '#005c4b' : '#2a3942') + ';color:#e9edef;font-size:12px;font-weight:700;letter-spacing:.2px;cursor:' + (switchingId !== null ? 'wait' : 'pointer') + ';outline:none;transition:transform .15s ease,background-color .15s ease,border-color .15s ease;';
+					button.textContent = isSwitching ? '…' : accountInitials(account.label);
+					if (isSwitching) button.setAttribute('aria-busy', 'true');
+					button.onclick = function() { requestSwitch(account); };
+					button.ondblclick = function(e) { e.preventDefault(); renameAccount(account); };
+					button.onmouseenter = function() { if (!button.disabled) button.style.transform = 'scale(1.06)'; };
+					button.onmouseleave = function() { button.style.transform = 'scale(1)'; };
+					scroll.appendChild(button);
+				});
+
+				dock.appendChild(scroll);
+
+				var atMax = accounts.length >= maxAccountsUI;
+				var add = document.createElement('button');
+				add.type = 'button';
+				add.disabled = switchingId !== null || atMax;
+				add.setAttribute('aria-label', atMax ? 'Maximum of ' + maxAccountsUI + ' accounts reached' : 'Add account');
+				add.title = atMax ? 'Maximum of ' + maxAccountsUI + ' accounts reached' : 'Add account';
+				add.textContent = '+';
+				var addColor = isDarkMode() ? '#8696a0' : '#667781';
+				add.style.cssText = 'margin-top:10px;width:38px;height:38px;padding:0;border-radius:50%;border:1px dashed ' + addColor + ';background:transparent;color:' + addColor + ';font-size:22px;font-weight:300;line-height:1;cursor:' + (add.disabled ? 'default' : 'pointer') + ';outline:none;opacity:' + (atMax ? '.45' : '1') + ';flex:none;';
+				add.onclick = createAccount;
+				dock.appendChild(add);
+			}
+
+			function loadAccounts() {
+				var sequence = ++refreshSequence;
+				if (!hasBridge('getAccountsNative')) {
+					removeDock();
+					return Promise.resolve([]);
+				}
+				return callBridge('getAccountsNative').then(function(value) {
+					var accounts = normalizeAccounts(value);
+					if (sequence === refreshSequence) renderDock(accounts);
+					return accounts;
+				}).catch(function() {
+					if (sequence === refreshSequence) removeDock();
+					return [];
+				});
+			}
+
+			function initializeDock() {
+				if (!hasBridge('getAccountsNative')) {
+					if (bridgeRetryCount++ < maxBridgeRetries) setTimeout(initializeDock, 250);
+					return;
+				}
+				loadAccounts();
+			}
+
+			window.addEventListener('keydown', function(e) {
+				if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || (e.key !== '1' && e.key !== '2')) return;
+				var accounts = window.__waAccountRailAccounts || [];
+				var account = accounts[Number(e.key) - 1];
+				if (!account) return;
+				e.preventDefault();
+				requestSwitch(account);
+			}, true);
+
+			var dockThemeObserver = new MutationObserver(function() {
+				var dock = document.getElementById(dockId);
+				if (dock) applyDockTheme(dock);
+			});
+			dockThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-wa-desk-theme'] });
+
+			initializeDock();
+			document.addEventListener('DOMContentLoaded', initializeDock, { once: true });
+		})();
+
 		// Dynamic Responsive Desktop Layout (enables seamless shrinking and expanding)
 		(function() {
 			var respStyle = document.createElement('style');

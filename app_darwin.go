@@ -11,6 +11,13 @@ package main
 #import <PDFKit/PDFKit.h>
 #include <stdlib.h>
 
+// Defined in the vendored WebKit header. Rebuilds the live WebView's browser
+// view in place for whichever profile WA_DESK_PROFILE_UUID now names, keeping
+// the window, menu bar, tray icon and the NSApplication main loop intact. This
+// is what makes an account switch read as an in-page reload rather than an app
+// restart. Returns 0 when no live instance is available.
+extern int webview_recreate_browser_active(void);
+
 // Declared early so the memory purge routine below can reach the live WKWebView
 // instance (and its real, already-attached website data store) instead of only
 // posting a notification that WebKit does not actually observe.
@@ -1082,239 +1089,383 @@ func runApp() {
 	}
 
 	userDataDir := getUserDataDir()
-	cacheDebugLog("startup: pid=%d profile=%s", os.Getpid(), userDataDir)
 
-	w := webview.New(false)
-	if w == nil {
-		log.Fatalln("Gagal inisialisasi WebKit WebView")
+	// Switching accounts never restarts the process: it tears down this sole
+	// WebView, waits for teardown, then loops back to build a fresh one bound
+	// to the newly active account's isolated profile. This keeps the window,
+	// tray icon, and PID stable across a switch instead of bouncing the Dock.
+	for {
+		profileID, err := activeAccountProfileIdentifier()
+		if err != nil {
+			log.Printf("unable to load account profile: %v", err)
+			return
+		}
+		if profileID == "" {
+			_ = os.Unsetenv("WA_DESK_PROFILE_UUID")
+		} else if err := os.Setenv("WA_DESK_PROFILE_UUID", profileID); err != nil {
+			log.Printf("unable to select account profile: %v", err)
+			return
+		}
+		cacheDebugLog("startup: pid=%d profile=%s account=%s", os.Getpid(), userDataDir, profileID)
+
+		w := webview.New(false)
+		if w == nil {
+			log.Fatalln("Gagal inisialisasi WebKit WebView")
+		}
+
+		// 1. Configure window behavior: dark title bar, close-to-hide, and dock click reopen
+		C.configureWindowBehavior(w.Window())
+
+		// Apply configured appearance theme (dark / light / system)
+		initSettings := loadSettings()
+		cTheme := C.CString(initSettings.Theme)
+		C.setNativeWindowTheme(w.Window(), cTheme)
+		C.free(unsafe.Pointer(cTheme))
+
+		// 2. Set native WebKit customUserAgent to Google Chrome & auto-grant media capture
+		cua := C.CString(userAgent)
+		C.setWKWebViewUserAgentAndMedia(w.Window(), cua)
+		C.free(unsafe.Pointer(cua))
+
+		// 3. Setup standard macOS menu bar and system status item (taskbar tray icon)
+		C.setupMacOSMenuBar()
+		C.setupStatusItem()
+
+		w.SetTitle(windowTitle)
+
+		// 4. Ensure window is initialized with HintNone (resizable), then restore
+		// the frame saved for the monitor the window currently sits on.
+		w.SetSize(windowWidth, windowHeight, webview.HintNone)
+		screenID := C.GoString(C.windowScreenIdentifier(w.Window()))
+		if state := loadWindowStateForScreen(userDataDir, screenID); state != nil {
+			C.setWindowFrame(w.Window(), C.double(state.X), C.double(state.Y), C.double(state.Width), C.double(state.Height))
+		}
+
+		// 5. Save window state only after a debounced resize event from the page.
+		// The callback runs on the WebView UI thread, as required by AppKit.
+		_ = w.Bind("saveWindowStateNative", func(width, height int) {
+			saveWindowState(userDataDir, w.Window())
+		})
+
+		// 6. Bind native notification bridge
+		_ = w.Bind("sendNativeNotification", func(title, body string) {
+			go showNativeNotification(title, body)
+		})
+
+		_ = w.Bind("releaseMemoryNative", func() {
+			C.triggerNativeMemoryPurge()
+			debugLogProcessStats("release-memory")
+			if debugEnabled() {
+				cacheDebugLog("cache disk total: %.0f MB", float64(C.whatsappDeskDiskCacheBytesSync())/1024/1024)
+			}
+		})
+
+		// 7. Bind external link handler to open links in macOS default browser
+		_ = w.Bind("openExternalLink", func(rawURL string) {
+			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+				_ = exec.Command("open", rawURL).Start()
+			}
+		})
+
+		// 8. Bind dock badge unread counter
+		_ = w.Bind("updateDockBadge", func(badge string) {
+			cstr := C.CString(badge)
+			defer C.free(unsafe.Pointer(cstr))
+			C.setDockBadge(cstr)
+		})
+
+		// 9. Bind Always on Top toggle
+		_ = w.Bind("toggleAlwaysOnTopNative", func() bool {
+			return C.toggleAlwaysOnTopInt(w.Window()) != 0
+		})
+
+		// 10. Bind Auto-Start toggle
+		_ = w.Bind("toggleAutoStartNative", func() bool {
+			return toggleAutoStartMac()
+		})
+
+		// 11. Bind in-app auto updater
+		_ = w.Bind("checkForUpdateNative", func(manual bool) UpdateInfo {
+			info, err := checkForUpdate(appVersion)
+			if err != nil {
+				return UpdateInfo{CurrentVersion: appVersion, CheckError: err.Error()}
+			}
+			return *info
+		})
+
+		_ = w.Bind("startUpdateNative", func(downloadURL string) {
+			go func() {
+				_ = executeUpdate(w, downloadURL)
+			}()
+		})
+
+		// 13. Bind download, preview, and settings handlers
+		_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
+			path, err := saveDownloadedFile(filename, dataURI)
+			if err != nil {
+				return ""
+			}
+			return path
+		})
+
+		_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
+			path, err := previewDocument(filename, dataURI)
+			if err != nil {
+				return ""
+			}
+			return path
+		})
+
+		_ = w.Bind("openFileNative", func(filePath string) bool {
+			return openFileInDefaultApp(filePath)
+		})
+
+		_ = w.Bind("showPDFPreviewNative", func(filePath string) bool {
+			path := C.CString(filePath)
+			defer C.free(unsafe.Pointer(path))
+			return C.showNativePDFPreviewInt(path) != 0
+		})
+
+		// Lazy-load SheetJS library for spreadsheet preview
+		_ = w.Bind("loadXLSXLibraryNative", func() string {
+			return xlsxLibJS
+		})
+
+		_ = w.Bind("getDownloadDirNative", func() string {
+			s := loadSettings()
+			return s.DownloadDir
+		})
+
+		_ = w.Bind("getOrganizeByMonthNative", func() bool {
+			return loadSettings().OrganizeByMonth
+		})
+
+		_ = w.Bind("setOrganizeByMonthNative", func(on bool) bool {
+			return setOrganizeByMonth(on)
+		})
+
+		_ = w.Bind("checkFileExistsNative", func(filename string) bool {
+			return fileExistsInDownloadDir(filename)
+		})
+
+		_ = w.Bind("chooseDownloadDirNative", func() string {
+			selected, err := chooseFolderDialog()
+			if err != nil || selected == "" {
+				return ""
+			}
+			s := loadSettings()
+			s.DownloadDir = selected
+			_ = saveSettings(s)
+			return selected
+		})
+
+		_ = w.Bind("openDownloadDirNative", func() bool {
+			s := loadSettings()
+			_ = openFolderInFileManager(s.DownloadDir)
+			return true
+		})
+
+		_ = w.Bind("resetDownloadDirNative", func() string {
+			s := loadSettings()
+			s.DownloadDir = getDefaultDownloadDir()
+			_ = saveSettings(s)
+			return s.DownloadDir
+		})
+
+		_ = w.Bind("getAppThemeNative", func() string {
+			s := loadSettings()
+			return s.Theme
+		})
+
+		_ = w.Bind("setAppThemeNative", func(theme string) string {
+			saved := saveTheme(theme)
+			cstr := C.CString(saved)
+			defer C.free(unsafe.Pointer(cstr))
+			C.setNativeWindowTheme(w.Window(), cstr)
+			return saved
+		})
+
+		// Spell check bindings
+		_ = w.Bind("getSpellCheckEnabledNative", func() bool {
+			return getSpellCheckEnabled()
+		})
+		_ = w.Bind("setSpellCheckEnabledNative", func(enabled bool) bool {
+			return setSpellCheckEnabled(enabled)
+		})
+		_ = w.Bind("getSpellCheckLangNative", func() string {
+			return getSpellCheckLang()
+		})
+		_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
+			return setSpellCheckLang(lang)
+		})
+		_ = w.Bind("getBlurAvatarsNative", func() bool {
+			return getBlurAvatars()
+		})
+		_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
+			return setBlurAvatars(on)
+		})
+		_ = w.Bind("getPendingCrashNative", func() string {
+			return pendingCrashReport()
+		})
+		_ = w.Bind("markCrashNotifiedNative", func() bool {
+			return markCrashNotified()
+		})
+
+		// Account bridge: the page sees display-only metadata, never a profile path.
+		// A switch rebuilds only the browser view in place, so the window, menu bar,
+		// tray icon, PID and the NSApplication main loop all survive; only if the
+		// native swap is unavailable does this fall back to the original teardown
+		// path that stops the loop and lets the next iteration rebuild the WebView.
+		switchRequested := false
+		switchMu := make(chan struct{}, 1)
+		_ = w.Bind("getAccountsNative", func() []map[string]any {
+			accounts, err := accountsForUI()
+			if err != nil {
+				return []map[string]any{}
+			}
+			return accounts
+		})
+		_ = w.Bind("createAccountNative", func(label string) map[string]any {
+			account, err := createAccount(label)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("renameAccountNative", func(id, label string) map[string]any {
+			account, err := renameAccount(id, label)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("requestAccountSwitchNative", func(id string) bool {
+			if switchRequested || isActiveAccount(id) || setActiveAccount(id) != nil {
+				return false
+			}
+			// Serialized: a second request arriving while a swap is in flight is
+			// dropped rather than racing the one already queued.
+			select {
+			case switchMu <- struct{}{}:
+			default:
+				return false
+			}
+			// Deferred to the next main-thread turn instead of running inline: this
+			// callback is still executing inside the very WebView that is about to
+			// be released, and webview_return() for this call still targets it.
+			w.Dispatch(func() {
+				defer func() { <-switchMu }()
+				if swapBrowserToActiveAccount(w) {
+					return
+				}
+				// Fallback: stop the loop so the next iteration rebuilds from scratch.
+				switchRequested = true
+				w.Terminate()
+			})
+			return true
+		})
+
+		w.Init(getInitScript(userAgent))
+		w.Navigate(appURL)
+		debugLogProcessStats("after-navigate")
+
+		// 12. Check for updates in the background after startup & periodically.
+		// stopUpdateTicker is per-iteration: it is closed before the next loop
+		// iteration destroys w, so this goroutine never touches a dead WebView
+		// after an account switch.
+		stopUpdateTicker := make(chan struct{})
+		go guardGoroutine("update-ticker", func() {
+			checkAndNotifyUpdate := func() {
+				info, err := checkForUpdate(appVersion)
+				if err == nil && info != nil && info.Available {
+					w.Dispatch(func() {
+						script := fmt.Sprintf("if (window.showUpdateBanner) { window.showUpdateBanner(%q, %q, %q); }",
+							info.LatestVersion, info.ReleaseTitle, info.DownloadURL)
+						w.Eval(script)
+					})
+				}
+			}
+
+			select {
+			case <-stopUpdateTicker:
+				return
+			case <-time.After(5 * time.Second):
+			}
+			checkAndNotifyUpdate()
+
+			ticker := time.NewTicker(4 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopUpdateTicker:
+					return
+				case <-ticker.C:
+					checkAndNotifyUpdate()
+				}
+			}
+		})
+
+		w.Run()
+		close(stopUpdateTicker)
+		saveWindowState(userDataDir, w.Window())
+		w.Destroy()
+
+		if !switchRequested {
+			return
+		}
+		// Loop back within this same process and window lifecycle, and build
+		// the next WebView bound to the account that is now active. This is only
+		// reached when the in-place browser swap reported itself unavailable.
 	}
-	defer w.Destroy()
+}
 
-	// 1. Configure window behavior: dark title bar, close-to-hide, and dock click reopen
-	C.configureWindowBehavior(w.Window())
+// applyActiveAccountProfile points WA_DESK_PROFILE_UUID at the active account's
+// profile identifier. It has to run before a browser view is created, because
+// the website data store is chosen at that exact moment. An empty identifier is
+// meaningful rather than a bug: it deliberately keeps the original account on
+// WebKit's default data store so existing users never have to pair again.
+func applyActiveAccountProfile() error {
+	profileID, err := activeAccountProfileIdentifier()
+	if err != nil {
+		return err
+	}
+	if profileID == "" {
+		return os.Unsetenv("WA_DESK_PROFILE_UUID")
+	}
+	return os.Setenv("WA_DESK_PROFILE_UUID", profileID)
+}
 
-	// Apply configured appearance theme (dark / light / system)
-	initSettings := loadSettings()
-	cTheme := C.CString(initSettings.Theme)
-	C.setNativeWindowTheme(w.Window(), cTheme)
-	C.free(unsafe.Pointer(cTheme))
-
-	// 2. Set native WebKit customUserAgent to Google Chrome & auto-grant media capture
+// swapBrowserToActiveAccount rebuilds the WebView's browser view in place for
+// whichever account is now active. The native window, its delegate, the app
+// delegate, the menu bar, the status item and the running NSApplication main
+// loop are all reused and never torn down, so an account switch reads as an
+// in-page reload rather than the visible close-and-reopen of an app restart.
+//
+// Only the browser view is replaced. The native WKUserContentController is
+// carried across, so every registered JS binding and the injected init script
+// keep working without being re-registered here.
+//
+// Returns false when the native swap is unavailable, which lets the caller fall
+// back to rebuilding the entire WebView.
+func swapBrowserToActiveAccount(w webview.WebView) bool {
+	if err := applyActiveAccountProfile(); err != nil {
+		log.Printf("unable to select account profile: %v", err)
+		return false
+	}
+	if C.webview_recreate_browser_active() == 0 {
+		log.Printf("native browser swap unavailable; rebuilding the WebView")
+		return false
+	}
+	// The replacement WKWebView is brand new, so the native tweaks that live on
+	// the view itself - custom user agent, media playback policy, layer settings
+	// - and the cached pointer used by the memory purge must be re-applied.
+	// Without the Chrome user agent WhatsApp Web refuses to serve the app shell.
 	cua := C.CString(userAgent)
 	C.setWKWebViewUserAgentAndMedia(w.Window(), cua)
 	C.free(unsafe.Pointer(cua))
-
-	// 3. Setup standard macOS menu bar and system status item (taskbar tray icon)
-	C.setupMacOSMenuBar()
-	C.setupStatusItem()
-
-	w.SetTitle(windowTitle)
-
-	// 4. Ensure window is initialized with HintNone (resizable), then restore
-	// the frame saved for the monitor the window currently sits on.
-	w.SetSize(windowWidth, windowHeight, webview.HintNone)
-	screenID := C.GoString(C.windowScreenIdentifier(w.Window()))
-	if state := loadWindowStateForScreen(userDataDir, screenID); state != nil {
-		C.setWindowFrame(w.Window(), C.double(state.X), C.double(state.Y), C.double(state.Width), C.double(state.Height))
-	}
-
-	// 5. Save window state only after a debounced resize event from the page.
-	// The callback runs on the WebView UI thread, as required by AppKit.
-	_ = w.Bind("saveWindowStateNative", func(width, height int) {
-		saveWindowState(userDataDir, w.Window())
-	})
-
-	// 6. Bind native notification bridge
-	_ = w.Bind("sendNativeNotification", func(title, body string) {
-		go showNativeNotification(title, body)
-	})
-
-	_ = w.Bind("releaseMemoryNative", func() {
-		C.triggerNativeMemoryPurge()
-		debugLogProcessStats("release-memory")
-		if debugEnabled() {
-			cacheDebugLog("cache disk total: %.0f MB", float64(C.whatsappDeskDiskCacheBytesSync())/1024/1024)
-		}
-	})
-
-	// 7. Bind external link handler to open links in macOS default browser
-	_ = w.Bind("openExternalLink", func(rawURL string) {
-		if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
-			_ = exec.Command("open", rawURL).Start()
-		}
-	})
-
-	// 8. Bind dock badge unread counter
-	_ = w.Bind("updateDockBadge", func(badge string) {
-		cstr := C.CString(badge)
-		defer C.free(unsafe.Pointer(cstr))
-		C.setDockBadge(cstr)
-	})
-
-	// 9. Bind Always on Top toggle
-	_ = w.Bind("toggleAlwaysOnTopNative", func() bool {
-		return C.toggleAlwaysOnTopInt(w.Window()) != 0
-	})
-
-	// 10. Bind Auto-Start toggle
-	_ = w.Bind("toggleAutoStartNative", func() bool {
-		return toggleAutoStartMac()
-	})
-
-	// 11. Bind in-app auto updater
-	_ = w.Bind("checkForUpdateNative", func(manual bool) UpdateInfo {
-		info, err := checkForUpdate(appVersion)
-		if err != nil {
-			return UpdateInfo{CurrentVersion: appVersion, CheckError: err.Error()}
-		}
-		return *info
-	})
-
-	_ = w.Bind("startUpdateNative", func(downloadURL string) {
-		go func() {
-			_ = executeUpdate(w, downloadURL)
-		}()
-	})
-
-	// 13. Bind download, preview, and settings handlers
-	_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
-		path, err := saveDownloadedFile(filename, dataURI)
-		if err != nil {
-			return ""
-		}
-		return path
-	})
-
-	_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
-		path, err := previewDocument(filename, dataURI)
-		if err != nil {
-			return ""
-		}
-		return path
-	})
-
-	_ = w.Bind("openFileNative", func(filePath string) bool {
-		return openFileInDefaultApp(filePath)
-	})
-
-	_ = w.Bind("showPDFPreviewNative", func(filePath string) bool {
-		path := C.CString(filePath)
-		defer C.free(unsafe.Pointer(path))
-		return C.showNativePDFPreviewInt(path) != 0
-	})
-
-	// Lazy-load SheetJS library for spreadsheet preview
-	_ = w.Bind("loadXLSXLibraryNative", func() string {
-		return xlsxLibJS
-	})
-
-	_ = w.Bind("getDownloadDirNative", func() string {
-		s := loadSettings()
-		return s.DownloadDir
-	})
-
-	_ = w.Bind("getOrganizeByMonthNative", func() bool {
-		return loadSettings().OrganizeByMonth
-	})
-
-	_ = w.Bind("setOrganizeByMonthNative", func(on bool) bool {
-		return setOrganizeByMonth(on)
-	})
-
-	_ = w.Bind("checkFileExistsNative", func(filename string) bool {
-		return fileExistsInDownloadDir(filename)
-	})
-
-	_ = w.Bind("chooseDownloadDirNative", func() string {
-		selected, err := chooseFolderDialog()
-		if err != nil || selected == "" {
-			return ""
-		}
-		s := loadSettings()
-		s.DownloadDir = selected
-		_ = saveSettings(s)
-		return selected
-	})
-
-	_ = w.Bind("openDownloadDirNative", func() bool {
-		s := loadSettings()
-		_ = openFolderInFileManager(s.DownloadDir)
-		return true
-	})
-
-	_ = w.Bind("resetDownloadDirNative", func() string {
-		s := loadSettings()
-		s.DownloadDir = getDefaultDownloadDir()
-		_ = saveSettings(s)
-		return s.DownloadDir
-	})
-
-	_ = w.Bind("getAppThemeNative", func() string {
-		s := loadSettings()
-		return s.Theme
-	})
-
-	_ = w.Bind("setAppThemeNative", func(theme string) string {
-		saved := saveTheme(theme)
-		cstr := C.CString(saved)
-		defer C.free(unsafe.Pointer(cstr))
-		C.setNativeWindowTheme(w.Window(), cstr)
-		return saved
-	})
-
-	// Spell check bindings
-	_ = w.Bind("getSpellCheckEnabledNative", func() bool {
-		return getSpellCheckEnabled()
-	})
-	_ = w.Bind("setSpellCheckEnabledNative", func(enabled bool) bool {
-		return setSpellCheckEnabled(enabled)
-	})
-	_ = w.Bind("getSpellCheckLangNative", func() string {
-		return getSpellCheckLang()
-	})
-	_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
-		return setSpellCheckLang(lang)
-	})
-	_ = w.Bind("getBlurAvatarsNative", func() bool {
-		return getBlurAvatars()
-	})
-	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
-		return setBlurAvatars(on)
-	})
-	_ = w.Bind("getPendingCrashNative", func() string {
-		return pendingCrashReport()
-	})
-	_ = w.Bind("markCrashNotifiedNative", func() bool {
-		return markCrashNotified()
-	})
-
-	w.Init(getInitScript(userAgent))
+	cacheDebugLog("account switch: profile=%s", os.Getenv("WA_DESK_PROFILE_UUID"))
+	// The fresh view starts blank; load WhatsApp Web into it. The carried-over
+	// init script and bindings are already installed, so no re-bind is needed.
 	w.Navigate(appURL)
-	debugLogProcessStats("after-navigate")
-
-	// 12. Check for updates in the background after startup & periodically
-	go guardGoroutine("update-ticker", func() {
-		checkAndNotifyUpdate := func() {
-			info, err := checkForUpdate(appVersion)
-			if err == nil && info != nil && info.Available {
-				w.Dispatch(func() {
-					script := fmt.Sprintf("if (window.showUpdateBanner) { window.showUpdateBanner(%q, %q, %q); }",
-						info.LatestVersion, info.ReleaseTitle, info.DownloadURL)
-					w.Eval(script)
-				})
-			}
-		}
-
-		time.Sleep(5 * time.Second)
-		checkAndNotifyUpdate()
-
-		ticker := time.NewTicker(4 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			checkAndNotifyUpdate()
-		}
-	})
-
-	defer saveWindowState(userDataDir, w.Window())
-	w.Run()
+	return true
 }

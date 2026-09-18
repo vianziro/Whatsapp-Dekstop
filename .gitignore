@@ -20,6 +20,21 @@ dist_linux*/
 rpms*/
 .gocache/
 .video_agent/
+WhatsAppDesk-dev
+WhatsApp_arm64
+WhatsApp_amd64
+WhatsApp_mac
+.debug-tmp/
+.build-native.hash
+
+# Spike reconnaissance scratch: raw command output captured while reverse
+# engineering the native webview API, plus the standalone ObjC probe. None of
+# it is source, and probe_ds.m breaks the build (its own int main collides with
+# the Go main) if it ever sits in the package directory.
+.scratch/
+probe_ds
+/probe_ds.m
+/*.txt
 
 # Internal project documentation & state
 MEMORY.md

@@ -11,17 +11,50 @@ RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 
 echo "Building universal binary for macOS (arm64 + x86_64)..."
 rm -f "${BINARY_NAME}_mac" "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
+
+# cgo does not invalidate its object cache when a vendored C/C++ *header*
+# changes: Go hashes the package's .go/.c/.cc sources, not every transitively
+# included .h. Editing libs/webview/include/webview.h therefore kept reusing a
+# stale object file, and the shipped app silently ran without the per-account
+# WKWebsiteDataStore code -- two accounts shared one WhatsApp session. Hash the
+# native sources and purge the cache whenever they change so a header edit can
+# never be ignored again.
+NATIVE_SOURCES=(
+    "vendor/github.com/webview/webview_go/webview.cc"
+    "vendor/github.com/webview/webview_go/glue.c"
+    "vendor/github.com/webview/webview_go/libs/webview/include/webview.h"
+)
+NATIVE_HASH="$(cat "${NATIVE_SOURCES[@]}" | shasum -a 256 | awk '{print $1}')"
+STAMP_FILE=".build-native.hash"
+if [ ! -f "${STAMP_FILE}" ] || [ "$(cat "${STAMP_FILE}")" != "${NATIVE_HASH}" ]; then
+    echo "Native webview sources changed - clearing stale Go build cache..."
+    go clean -cache
+    printf '%s' "${NATIVE_HASH}" > "${STAMP_FILE}"
+fi
+
+LDFLAGS="-s -w -buildid= -X main.appVersion=${VERSION}"
 LIPO="/usr/bin/lipo"
 if [ -x "$LIPO" ] && \
-   CGO_ENABLED=1 GOARCH=arm64 CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" GOTOOLCHAIN=local go build -ldflags="-s -w -buildid= -X main.appVersion=${VERSION}" -trimpath -o "${BINARY_NAME}_arm64" . 2>/dev/null && \
-   CGO_ENABLED=1 GOARCH=amd64 CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" GOTOOLCHAIN=local go build -ldflags="-s -w -buildid= -X main.appVersion=${VERSION}" -trimpath -o "${BINARY_NAME}_amd64" . 2>/dev/null; then
+   CGO_ENABLED=1 GOARCH=arm64 CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" GOTOOLCHAIN=local go build -ldflags="${LDFLAGS}" -trimpath -o "${BINARY_NAME}_arm64" . && \
+   CGO_ENABLED=1 GOARCH=amd64 CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" GOTOOLCHAIN=local go build -ldflags="${LDFLAGS}" -trimpath -o "${BINARY_NAME}_amd64" .; then
     "$LIPO" -create -output "${BINARY_NAME}_mac" "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
     rm -f "${BINARY_NAME}_arm64" "${BINARY_NAME}_amd64"
     echo "Successfully built universal binary (Apple Silicon + Intel)"
 else
     echo "Falling back to native host architecture build..."
-    GOTOOLCHAIN=local go build -ldflags="-s -w -buildid= -X main.appVersion=${VERSION}" -trimpath -o "${BINARY_NAME}_mac" .
+    GOTOOLCHAIN=local go build -ldflags="${LDFLAGS}" -trimpath -o "${BINARY_NAME}_mac" .
 fi
+
+# Refuse to package a binary that lacks the profile-selection code. This is the
+# exact failure that shipped a broken multi-account build, so it is now a hard
+# build-time gate rather than something only noticed at runtime.
+if ! grep -aq "wa-desk-profile" "${BINARY_NAME}_mac"; then
+    echo "ERROR: ${BINARY_NAME}_mac is missing the WKWebsiteDataStore profile code." >&2
+    echo "       Account isolation would silently fail. Aborting." >&2
+    rm -f "${BINARY_NAME}_mac"
+    exit 1
+fi
+echo "Verified: per-account profile code is present in the binary."
 
 echo "Packaging ${BUNDLE_DIR}..."
 rm -rf "${BUNDLE_DIR}"
