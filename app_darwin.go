@@ -4,11 +4,13 @@ package main
 
 /*
 #cgo darwin CFLAGS: -x objective-c
-#cgo darwin LDFLAGS: -framework Cocoa -framework WebKit -framework PDFKit
+#cgo darwin LDFLAGS: -framework Cocoa -framework WebKit -framework PDFKit -framework UserNotifications -framework AVFoundation
 
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <PDFKit/PDFKit.h>
+#import <UserNotifications/UserNotifications.h>
+#import <AVFoundation/AVFoundation.h>
 #include <stdlib.h>
 
 // Defined in the vendored WebKit header. Rebuilds the live WebView's browser
@@ -22,6 +24,31 @@ extern int webview_recreate_browser_active(void);
 // instance (and its real, already-attached website data store) instead of only
 // posting a notification that WebKit does not actually observe.
 static WKWebView* g_mainWebView = nil;
+
+static const char* mediaPermissionStatus(AVMediaType type) {
+    switch ([AVCaptureDevice authorizationStatusForMediaType:type]) {
+        case AVAuthorizationStatusAuthorized: return "authorized";
+        case AVAuthorizationStatusDenied: return "denied";
+        case AVAuthorizationStatusRestricted: return "restricted";
+        default: return "not-determined";
+    }
+}
+
+static const char* cameraPermissionStatus(void) {
+    return mediaPermissionStatus(AVMediaTypeVideo);
+}
+
+static const char* microphonePermissionStatus(void) {
+    return mediaPermissionStatus(AVMediaTypeAudio);
+}
+
+static int openMediaPrivacySettings(const char* kind) {
+    NSString* section = (kind && strcmp(kind, "microphone") == 0) ?
+        @"Privacy_Microphone" : @"Privacy_Camera";
+    NSString* raw = [NSString stringWithFormat:
+        @"x-apple.systempreferences:com.apple.preference.security?%@", section];
+    return [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:raw]] ? 1 : 0;
+}
 
 static void configureWebKitMemoryLimits(void) {
     static dispatch_once_t onceToken;
@@ -150,7 +177,7 @@ static void triggerNativeMemoryPurge(void) {
 }
 @end
 
-@interface WhatsAppAppDelegate : NSObject <NSApplicationDelegate, NSUserNotificationCenterDelegate>
+@interface WhatsAppAppDelegate : NSObject <NSApplicationDelegate, UNUserNotificationCenterDelegate>
 @property (assign) NSWindow *window;
 @end
 
@@ -163,32 +190,59 @@ static void triggerNativeMemoryPurge(void) {
     return YES;
 }
 
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
-    return YES;
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler {
+    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
 }
 
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+ didReceiveNotificationResponse:(UNNotificationResponse *)response
+          withCompletionHandler:(void (^)(void))completionHandler {
     if (self.window) {
         [self.window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
     }
+    completionHandler();
 }
 @end
 
+static BOOL nativeMacNotificationsAvailable(void) {
+    NSBundle *bundle = [NSBundle mainBundle];
+    // `go run .` executes from a temporary path instead of an app bundle.
+    // UserNotifications requires a real bundle identifier and otherwise
+    // raises an uncaught exception when currentNotificationCenter is queried.
+    return bundle.bundleURL != nil && bundle.bundleIdentifier.length > 0;
+}
+
 static void postNativeMacNotification(const char* titleStr, const char* bodyStr) {
     @autoreleasepool {
-        NSUserNotification *notification = [[NSUserNotification alloc] init];
+        if (!nativeMacNotificationsAvailable()) return;
+        UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
         if (titleStr && strlen(titleStr) > 0) {
-            notification.title = [NSString stringWithUTF8String:titleStr];
+            content.title = [NSString stringWithUTF8String:titleStr];
         } else {
-            notification.title = @"WhatsApp Desk";
+            content.title = @"WhatsApp Desk";
         }
         if (bodyStr && strlen(bodyStr) > 0) {
-            notification.informativeText = [NSString stringWithUTF8String:bodyStr];
+            content.body = [NSString stringWithUTF8String:bodyStr];
         }
-        notification.soundName = NSUserNotificationDefaultSoundName;
-        [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
+        content.sound = [UNNotificationSound defaultSound];
+        UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:[[NSUUID UUID] UUIDString]
+                                                                                content:content
+                                                                                trigger:nil];
+        [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:nil];
     }
+}
+
+static void requestNativeMacNotificationAuthorization(void) {
+    if (!nativeMacNotificationsAvailable()) return;
+    [[UNUserNotificationCenter currentNotificationCenter]
+        requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+                      completionHandler:^(BOOL granted, NSError *error) {
+                          (void)granted;
+                          (void)error;
+                      }];
 }
 
 @interface WhatsAppUIDelegate : NSObject <WKUIDelegate>
@@ -209,7 +263,10 @@ static void postNativeMacNotification(const char* titleStr, const char* bodyStr)
     }
 }
 - (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision decision))decisionHandler {
-    decisionHandler(WKPermissionDecisionGrant);
+    NSString *host = origin.host.lowercaseString;
+    BOOL isWhatsAppOrigin = [origin.protocol.lowercaseString isEqualToString:@"https"] &&
+        ([host isEqualToString:@"whatsapp.com"] || [host hasSuffix:@".whatsapp.com"]);
+    decisionHandler(isWhatsAppOrigin ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
 }
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
     if (!navigationAction.targetFrame.isMainFrame) {
@@ -297,8 +354,6 @@ static void configureWindowBehavior(void* nsWindowPtr) {
         [win setStyleMask:mask];
 
         [win setCollectionBehavior:(NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorDefault)];
-        [win setShowsResizeIndicator:YES];
-
         // Minimum bounds: allow shrinking down dynamically to compact window
         [win setMinSize:NSMakeSize(450, 320)];
         [win setContentMinSize:NSMakeSize(450, 320)];
@@ -319,7 +374,11 @@ static void configureWindowBehavior(void* nsWindowPtr) {
         g_appDelegate = [[WhatsAppAppDelegate alloc] init];
         g_appDelegate.window = win;
         [NSApp setDelegate:g_appDelegate];
-        [[NSUserNotificationCenter defaultUserNotificationCenter] setDelegate:g_appDelegate];
+        if (nativeMacNotificationsAvailable()) {
+            UNUserNotificationCenter *notificationCenter = [UNUserNotificationCenter currentNotificationCenter];
+            notificationCenter.delegate = g_appDelegate;
+            requestNativeMacNotificationAuthorization();
+        }
     }
 }
 
@@ -907,6 +966,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"os/exec"
@@ -1037,17 +1097,35 @@ func getLaunchAgentPath() string {
 	return filepath.Join(home, "Library", "LaunchAgents", "com.whatsapp.desk.plist")
 }
 
+func isAutoStartMac() bool {
+	plistPath := getLaunchAgentPath()
+	if plistPath == "" {
+		return false
+	}
+	if _, err := os.Stat(plistPath); err != nil {
+		return false
+	}
+	return exec.Command("/bin/launchctl", "print", launchAgentDomain()+"/com.whatsapp.desk").Run() == nil
+}
+
 func toggleAutoStartMac() bool {
 	plistPath := getLaunchAgentPath()
 	if plistPath == "" {
 		return false
 	}
-	if _, err := os.Stat(plistPath); err == nil {
+	if isAutoStartMac() {
+		_ = unloadLaunchAgent(plistPath)
 		_ = os.Remove(plistPath)
 		return false
 	}
+	// Remove a stale plist before writing and bootstrapping the replacement.
+	_ = os.Remove(plistPath)
 
 	appPath := getAppBundlePath()
+	programArguments := fmt.Sprintf("        <string>%s</string>\n", xmlEscape(appPath))
+	if strings.HasSuffix(strings.ToLower(appPath), ".app") {
+		programArguments = fmt.Sprintf("        <string>/usr/bin/open</string>\n        <string>-a</string>\n        <string>%s</string>\n", xmlEscape(appPath))
+	}
 	plistContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1056,19 +1134,38 @@ func toggleAutoStartMac() bool {
     <string>com.whatsapp.desk</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/open</string>
-        <string>%s</string>
+%s
     </array>
     <key>RunAtLoad</key>
     <true/>
 </dict>
-</plist>`, appPath)
+</plist>`, programArguments)
 
 	_ = os.MkdirAll(filepath.Dir(plistPath), 0755)
 	if err := os.WriteFile(plistPath, []byte(plistContent), 0644); err != nil {
 		return false
 	}
+	if err := loadLaunchAgent(plistPath); err != nil {
+		_ = os.Remove(plistPath)
+		return false
+	}
 	return true
+}
+
+func xmlEscape(value string) string {
+	return html.EscapeString(value)
+}
+
+func launchAgentDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func loadLaunchAgent(plistPath string) error {
+	return exec.Command("/bin/launchctl", "bootstrap", launchAgentDomain(), plistPath).Run()
+}
+
+func unloadLaunchAgent(plistPath string) error {
+	return exec.Command("/bin/launchctl", "bootout", launchAgentDomain(), plistPath).Run()
 }
 
 func showNativeNotification(title, message string) {
@@ -1151,6 +1248,8 @@ func runApp() {
 		_ = w.Bind("sendNativeNotification", func(title, body string) {
 			go showNativeNotification(title, body)
 		})
+		_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
+		_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
 
 		_ = w.Bind("releaseMemoryNative", func() {
 			C.triggerNativeMemoryPurge()
@@ -1179,7 +1278,10 @@ func runApp() {
 			return C.toggleAlwaysOnTopInt(w.Window()) != 0
 		})
 
-		// 10. Bind Auto-Start toggle
+		// 10. Bind Auto-Start query and toggle
+		_ = w.Bind("getAutoStartNative", func() bool {
+			return isAutoStartMac()
+		})
 		_ = w.Bind("toggleAutoStartNative", func() bool {
 			return toggleAutoStartMac()
 		})
@@ -1197,6 +1299,18 @@ func runApp() {
 			go func() {
 				_ = executeUpdate(w, downloadURL)
 			}()
+		})
+
+		_ = w.Bind("getCameraPermissionNative", func() string {
+			return C.GoString(C.cameraPermissionStatus())
+		})
+		_ = w.Bind("getMicrophonePermissionNative", func() string {
+			return C.GoString(C.microphonePermissionStatus())
+		})
+		_ = w.Bind("openMediaPrivacySettingsNative", func(kind string) bool {
+			cKind := C.CString(kind)
+			defer C.free(unsafe.Pointer(cKind))
+			return C.openMediaPrivacySettings(cKind) != 0
 		})
 
 		// 13. Bind download, preview, and settings handlers

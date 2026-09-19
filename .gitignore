@@ -17,7 +17,10 @@ whatsapp-desktop
 *.rpm
 *.deb
 dist_linux*/
+dist_win/
 rpms*/
+*Setup.exe
+SHA256SUMS
 .gocache/
 .video_agent/
 WhatsAppDesk-dev

@@ -1,9 +1,20 @@
 name: Release
 
+# MANUAL ONLY — do not re-add a tag trigger.
+#
+# This workflow used to run on every `v*` tag. Hosted runners require a healthy
+# account, and while the repository owner's account is locked for billing
+# reasons every tag push produced a failed run in four seconds (the `prepare`
+# job never started, so all build jobs were skipped and `publish` never ran).
+# Releases are therefore built and published from a local machine with
+# `bash release.sh <version>`, which produces the same artifacts and uploads
+# them with SHA256SUMS.
+#
+# The job definitions below are kept intact so the workflow can be run by hand
+# from the Actions tab (or with `gh workflow run`) whenever hosted runners are
+# available again. Re-adding the tag trigger without fixing the account would
+# only restore the failing runs.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -62,7 +73,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - name: Build Windows binary
+      - name: Build Windows binary and installer
         shell: bash
         run: bash build.sh windows "${{ needs.prepare.outputs.version }}"
       - uses: actions/upload-artifact@v4
@@ -71,6 +82,7 @@ jobs:
           path: |
             WhatsAppDesk.exe
             WhatsApp-Desk-Windows-x64.zip
+            WhatsApp-Desk-Windows-x64-Setup.exe
 
   linux-x64:
     needs: prepare
@@ -81,8 +93,12 @@ jobs:
         with:
           go-version: "1.26"
       - name: Install WebKitGTK deps
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+        # `rpm` supplies rpmbuild so the Fedora/RHEL package is produced on the
+        # same runner as the DEB and tarball, instead of being uploaded by hand.
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev rpm
       - name: Build Linux packages
+        env:
+          WA_DESK_BUILD_RPM: "1"
         run: bash build_linux.sh "${{ needs.prepare.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -90,6 +106,7 @@ jobs:
           path: |
             WhatsApp-Desk-Linux-x64.tar.gz
             WhatsApp-Desk-Linux-amd64.deb
+            WhatsApp-Desk-Fedora-x64.rpm
 
   linux-arm64:
     needs: prepare
@@ -103,8 +120,10 @@ jobs:
         with:
           go-version: "1.26"
       - name: Install WebKitGTK deps
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev rpm
       - name: Build Linux arm64 packages
+        env:
+          WA_DESK_BUILD_RPM: "1"
         run: bash build_linux.sh "${{ needs.prepare.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -113,6 +132,7 @@ jobs:
           path: |
             WhatsApp-Desk-Linux-arm64.tar.gz
             WhatsApp-Desk-Linux-arm64.deb
+            WhatsApp-Desk-Fedora-arm64.rpm
 
   publish:
     needs: [prepare, macos, windows, linux-x64, linux-arm64]
@@ -122,17 +142,50 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Generate SHA256SUMS
+        working-directory: release-assets
+        run: |
+          # One line per published artifact, GNU coreutils format, so users can
+          # verify with: sha256sum -c SHA256SUMS  (shasum -c on macOS).
+          # The in-app updater downloads this file and refuses to install an
+          # artifact whose digest does not match.
+          set -euo pipefail
+          for f in WhatsAppDesk.exe \
+                   WhatsApp-Desk-Windows-x64.zip \
+                   WhatsApp-Desk-Windows-x64-Setup.exe \
+                   WhatsApp-Desk-macOS-Universal.dmg \
+                   WhatsApp-Desk-macOS-Universal.zip \
+                   WhatsApp-Desk-Linux-x64.tar.gz \
+                   WhatsApp-Desk-Linux-amd64.deb \
+                   WhatsApp-Desk-Linux-arm64.tar.gz \
+                   WhatsApp-Desk-Linux-arm64.deb \
+                   WhatsApp-Desk-Fedora-x64.rpm \
+                   WhatsApp-Desk-Fedora-arm64.rpm; do
+            if [ -f "$f" ]; then
+              sha256sum "$f" >> SHA256SUMS
+            else
+              echo "::warning::expected release asset missing: $f"
+            fi
+          done
+          test -s SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
           generate_release_notes: true
           files: |
+            release-assets/SHA256SUMS
             release-assets/WhatsAppDesk.exe
             release-assets/WhatsApp-Desk-Windows-x64.zip
+            release-assets/WhatsApp-Desk-Windows-x64-Setup.exe
             release-assets/WhatsApp-Desk-macOS-Universal.dmg
             release-assets/WhatsApp-Desk-macOS-Universal.zip
             release-assets/WhatsApp-Desk-Linux-x64.tar.gz
             release-assets/WhatsApp-Desk-Linux-amd64.deb
             release-assets/WhatsApp-Desk-Linux-arm64.tar.gz
             release-assets/WhatsApp-Desk-Linux-arm64.deb
+            release-assets/WhatsApp-Desk-Fedora-x64.rpm
+            release-assets/WhatsApp-Desk-Fedora-arm64.rpm

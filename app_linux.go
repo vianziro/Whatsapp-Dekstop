@@ -51,6 +51,13 @@ static void moveWindowTo(void* winPtr, int x, int y, int w, int h) {
 	gtk_window_resize(GTK_WINDOW(win), w, h);
 }
 
+// Size-only restore for compositors (Wayland) that reject client positioning.
+static void resizeWindowTo(void* winPtr, int w, int h) {
+	GtkWidget* win = GTK_WIDGET(winPtr);
+	if (!win) return;
+	gtk_window_resize(GTK_WINDOW(win), w, h);
+}
+
 // Read the current frame. Returns 1 when the window manager reports a real
 // position, 0 otherwise (Wayland never exposes absolute positions, so callers
 // must treat x/y as unusable there and restore only the size).
@@ -573,9 +580,9 @@ StartupNotify=true
 	return err == nil
 }
 
-func loadWindowState(dir string) *WindowState {
-	path := filepath.Join(dir, "window_state.json")
-	data, err := os.ReadFile(path)
+// readWindowStateFile loads and validates the persisted window state.
+func readWindowStateFile(dir string) *WindowState {
+	data, err := os.ReadFile(filepath.Join(dir, "window_state.json"))
 	if err != nil {
 		return nil
 	}
@@ -583,30 +590,103 @@ func loadWindowState(dir string) *WindowState {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil
 	}
-	if state.Width < 450 || state.Height < 320 {
-		return nil
-	}
 	return &state
 }
 
-var lastSavedStateLinux *WindowState
+// loadWindowStateForMonitor picks the frame to restore for the monitor the
+// window currently sits on. Wayland compositors never expose absolute window
+// positions (gtk_window_get_position returns FALSE there), so state saved on
+// Wayland carries size only — X and Y are both zero. Such entries are always
+// accepted and restored as size-only, letting the compositor place the window
+// itself. X11 frames are verified to still overlap a connected monitor so a
+// disconnected display can never strand the window off-screen.
+func loadWindowStateForMonitor(dir, monitorKey string) *WindowState {
+	state := readWindowStateFile(dir)
+	if state == nil {
+		return nil
+	}
+	validSize := func(s WindowState) bool { return s.Width >= 450 && s.Height >= 320 }
 
-func saveWindowState(dir string, width, height int) {
-	if width >= 450 && height >= 320 {
-		if lastSavedStateLinux != nil &&
-			lastSavedStateLinux.Width == float64(width) &&
-			lastSavedStateLinux.Height == float64(height) {
-			return // Avoid redundant disk writes
+	if monitorKey != "" {
+		if per, ok := state.Screens[monitorKey]; ok && validSize(per) {
+			if per.X == 0 && per.Y == 0 {
+				return &per
+			}
+			if C.frameOnSomeMonitor(C.int(per.X), C.int(per.Y), C.int(per.Width), C.int(per.Height)) != 0 {
+				return &per
+			}
+			// Saved frame no longer lands on any monitor: keep the size, but
+			// let the window manager choose a position.
+			return &WindowState{Width: per.Width, Height: per.Height}
 		}
-		state := WindowState{
-			Width:  float64(width),
-			Height: float64(height),
+	}
+	if validSize(*state) {
+		if state.X == 0 && state.Y == 0 {
+			return state
 		}
-		data, err := json.MarshalIndent(state, "", "  ")
-		if err == nil {
-			_ = os.WriteFile(filepath.Join(dir, "window_state.json"), data, 0644)
-			lastSavedStateLinux = &state
+		if C.frameOnSomeMonitor(C.int(state.X), C.int(state.Y), C.int(state.Width), C.int(state.Height)) != 0 {
+			return state
 		}
+		return &WindowState{Width: state.Width, Height: state.Height}
+	}
+	return nil
+}
+
+// saveWindowState records the live frame. On X11 the frame is stored per
+// monitor (keyed by connector|model so it survives replugging) alongside the
+// legacy top-level fields; on Wayland only the size is meaningful and only the
+// legacy fields are written. fallbackWidth/Height come from the page's resize
+// event and cover the window not being realized yet.
+func saveWindowState(dir string, win unsafe.Pointer, fallbackWidth, fallbackHeight int) {
+	if win == nil {
+		return
+	}
+	var x, y, w, h C.int
+	hasPosition := C.getWindowFrameLinux(win, &x, &y, &w, &h) != 0
+	if w < 450 || h < 320 {
+		// Not realized yet (or a transient zero frame): trust the page size.
+		w = C.int(fallbackWidth)
+		h = C.int(fallbackHeight)
+		hasPosition = false
+	}
+	if w < 450 || h < 320 {
+		return
+	}
+
+	state := readWindowStateFile(dir)
+	if state == nil {
+		state = &WindowState{}
+	}
+	if state.Screens == nil {
+		state.Screens = map[string]WindowState{}
+	}
+
+	if !hasPosition {
+		if state.Width == float64(w) && state.Height == float64(h) {
+			return // size unchanged — skip the disk write
+		}
+		state.Width = float64(w)
+		state.Height = float64(h)
+	} else {
+		monitorKey := C.GoString(C.windowMonitorName(win))
+		entry := WindowState{X: float64(x), Y: float64(y), Width: float64(w), Height: float64(h)}
+		if monitorKey != "" {
+			if prev, ok := state.Screens[monitorKey]; ok &&
+				prev.X == entry.X && prev.Y == entry.Y &&
+				prev.Width == entry.Width && prev.Height == entry.Height {
+				return // unchanged on this monitor — skip the disk write
+			}
+			state.Screens[monitorKey] = entry
+		}
+		state.X = entry.X
+		state.Y = entry.Y
+		state.Width = entry.Width
+		state.Height = entry.Height
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "window_state.json"), data, 0644)
 	}
 }
 
@@ -640,13 +720,17 @@ func runApp() {
 	}
 	enforceDiskCacheCapFrom(linuxCacheHomes, linuxPurgeTargets, "startup")
 
-	// Restore window state if previously saved
+	// Restore window state if previously saved. The monitor the window will
+	// land on is only known once the window is realized, so this first pass
+	// applies the legacy top-level frame (position on X11, size everywhere)
+	// and a second pass below refines it to the per-monitor entry.
 	initialWidth := windowWidth
 	initialHeight := windowHeight
-	state := loadWindowState(userDataDir)
-	if state != nil {
-		initialWidth = int(state.Width)
-		initialHeight = int(state.Height)
+	if state := readWindowStateFile(userDataDir); state != nil {
+		if state.Width >= 450 && state.Height >= 320 {
+			initialWidth = int(state.Width)
+			initialHeight = int(state.Height)
+		}
 	}
 
 	w := webview.New(false)
@@ -659,9 +743,10 @@ func runApp() {
 	w.SetTitle(windowTitle)
 	w.SetSize(initialWidth, initialHeight, webview.HintNone)
 
-	// Bind window state saver from JS resize events
+	// Bind window state saver from JS resize events. The window handle is
+	// passed through so X11 frames can be stored per monitor.
 	_ = w.Bind("saveWindowStateNative", func(width, height int) {
-		saveWindowState(userDataDir, width, height)
+		saveWindowState(userDataDir, w.Window(), width, height)
 	})
 
 	iconPath := ensureAppIconFileLinux(userDataDir)
@@ -674,6 +759,8 @@ func runApp() {
 	_ = w.Bind("sendNativeNotification", func(title, body string) {
 		go showNativeNotification(title, body, iconPath)
 	})
+	_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
+	_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
 
 	_ = w.Bind("releaseMemoryNative", func() {
 		debug.FreeOSMemory()
@@ -857,6 +944,43 @@ func runApp() {
 		}
 	})
 
-	defer saveWindowState(userDataDir, initialWidth, initialHeight)
+	// Second pass: once the window is realized the compositor has placed it on
+	// a monitor, so the frame saved for that specific display can be applied.
+	// Runs on the UI thread via Dispatch; a short delay avoids fighting the
+	// window manager's own initial placement.
+	go guardGoroutine("restore-monitor-frame", func() {
+		time.Sleep(900 * time.Millisecond)
+		w.Dispatch(func() {
+			win := w.Window()
+			if win == nil {
+				return
+			}
+			monitorKey := C.GoString(C.windowMonitorName(win))
+			state := loadWindowStateForMonitor(userDataDir, monitorKey)
+			if state == nil {
+				return
+			}
+			// Wayland exposes no absolute position: keep whatever placement
+			// the compositor chose and only honor a saved size. gtk_window_move
+			// is a no-op there, so the resize-only helper is used to avoid
+			// passing coordinates the compositor never reported.
+			var x, y, curW, curH C.int
+			hasPosition := C.getWindowFrameLinux(win, &x, &y, &curW, &curH) != 0
+			if !hasPosition {
+				if int(curW) == int(state.Width) && int(curH) == int(state.Height) {
+					return
+				}
+				C.resizeWindowTo(win, C.int(state.Width), C.int(state.Height))
+				return
+			}
+			if int(x) == int(state.X) && int(y) == int(state.Y) &&
+				int(curW) == int(state.Width) && int(curH) == int(state.Height) {
+				return // already where it belongs
+			}
+			C.moveWindowTo(win, C.int(state.X), C.int(state.Y), C.int(state.Width), C.int(state.Height))
+		})
+	})
+
+	defer saveWindowState(userDataDir, w.Window(), initialWidth, initialHeight)
 	w.Run()
 }

@@ -37,6 +37,9 @@ var (
 	procSetWindowLong            = user32.NewProc("SetWindowLongW")
 	procSetWindowPos             = user32.NewProc("SetWindowPos")
 	procGetWindowRect            = user32.NewProc("GetWindowRect")
+	procGetWindowPlacement       = user32.NewProc("GetWindowPlacement")
+	procIsZoomed                 = user32.NewProc("IsZoomed")
+	procIsIconic                 = user32.NewProc("IsIconic")
 	procMoveWindow               = user32.NewProc("MoveWindow")
 	procMonitorFromPoint         = user32.NewProc("MonitorFromPoint")
 	procGetMonitorInfo           = user32.NewProc("GetMonitorInfoW")
@@ -62,6 +65,9 @@ const (
 	SWP_NOMOVE       = 0x0002
 	SWP_NOSIZE       = 0x0001
 	SWP_NOZORDER     = 0x0004
+
+	SW_MAXIMIZE = 3
+	SW_RESTORE  = 9
 
 	// Window Z-Order constants for Always On Top
 	HWND_TOPMOST   = ^uintptr(0) // -1
@@ -207,13 +213,18 @@ func hiddenCommand(name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+func isAutoStartWindows() bool {
+	runKey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+	valName := "WhatsAppDesk"
+	err := hiddenCommand("reg", "query", runKey, "/v", valName).Run()
+	return err == nil
+}
+
 func toggleAutoStartWindows() bool {
 	runKey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 	valName := "WhatsAppDesk"
 
-	// Check if already configured
-	err := hiddenCommand("reg", "query", runKey, "/v", valName).Run()
-	if err == nil {
+	if isAutoStartWindows() {
 		// Key exists, remove it
 		_ = hiddenCommand("reg", "delete", runKey, "/v", valName, "/f").Run()
 		return false
@@ -302,6 +313,19 @@ func initWindowsProcessProtection() {
 
 type RECT struct {
 	Left, Top, Right, Bottom int32
+}
+
+type POINT struct {
+	X, Y int32
+}
+
+type WINDOWPLACEMENT struct {
+	Length           uint32
+	Flags            uint32
+	ShowCmd          uint32
+	PtMinPosition    POINT
+	PtMaxPosition    POINT
+	RcNormalPosition RECT
 }
 
 func isWindowsSystemDarkTheme() bool {
@@ -543,13 +567,25 @@ func loadWindowStateForMonitor(dir, monitorKey string) *WindowState {
 }
 
 func saveWindowState(dir string, hwnd uintptr) {
-	var r RECT
-	ret, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+	// Don't save if minimized
+	if isMin, _, _ := procIsIconic.Call(hwnd); isMin != 0 {
+		return
+	}
+
+	var wp WINDOWPLACEMENT
+	wp.Length = uint32(unsafe.Sizeof(wp))
+	ret, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
 	if ret == 0 {
 		return
 	}
-	w := r.Right - r.Left
-	h := r.Bottom - r.Top
+
+	isZoomedRet, _, _ := procIsZoomed.Call(hwnd)
+	isMaximized := (isZoomedRet != 0) || (wp.ShowCmd == SW_MAXIMIZE)
+
+	// Use normal restored position so maximizing never corrupts the restored bounds
+	normRect := wp.RcNormalPosition
+	w := normRect.Right - normRect.Left
+	h := normRect.Bottom - normRect.Top
 	if w < 450 || h < 320 {
 		return
 	}
@@ -557,7 +593,8 @@ func saveWindowState(dir string, hwnd uintptr) {
 
 	// Read-modify-write so other monitors' frames survive.
 	state := WindowState{
-		X: float64(r.Left), Y: float64(r.Top), Width: float64(w), Height: float64(h),
+		X: float64(normRect.Left), Y: float64(normRect.Top), Width: float64(w), Height: float64(h),
+		Maximized: isMaximized,
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "window_state.json")); err == nil {
 		var existing WindowState
@@ -571,10 +608,14 @@ func saveWindowState(dir string, hwnd uintptr) {
 	if monitorKey != "" {
 		if prev, ok := state.Screens[monitorKey]; ok &&
 			prev.X == state.X && prev.Y == state.Y &&
-			prev.Width == state.Width && prev.Height == state.Height {
+			prev.Width == state.Width && prev.Height == state.Height &&
+			prev.Maximized == state.Maximized {
 			return // unchanged on this monitor — skip the disk write
 		}
-		state.Screens[monitorKey] = WindowState{X: state.X, Y: state.Y, Width: state.Width, Height: state.Height}
+		state.Screens[monitorKey] = WindowState{
+			X: state.X, Y: state.Y, Width: state.Width, Height: state.Height,
+			Maximized: state.Maximized,
+		}
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err == nil {
@@ -643,6 +684,9 @@ func runApp() {
 
 	if state := loadWindowStateForMonitor(userDataDir, windowMonitorKey(hwnd)); state != nil {
 		procMoveWindow.Call(hwnd, uintptr(int32(state.X)), uintptr(int32(state.Y)), uintptr(int32(state.Width)), uintptr(int32(state.Height)), 1)
+		if state.Maximized {
+			procShowNormal.Call(hwnd, uintptr(SW_MAXIMIZE))
+		}
 	}
 
 	_ = w.Bind("saveWindowStateNative", func(width, height int) {
@@ -653,6 +697,8 @@ func runApp() {
 	_ = w.Bind("sendNativeNotification", func(title, body string) {
 		go showNativeNotification(title, body, iconFullPath, executablePath)
 	})
+	_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
+	_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
 
 	_ = w.Bind("releaseMemoryNative", func() {
 		// Note: do NOT call w.Suspend() here. The webview2 vendor library already
@@ -691,7 +737,10 @@ func runApp() {
 		return toggleAlwaysOnTop(hwnd)
 	})
 
-	// Bind Auto-Start toggle
+	// Bind Auto-Start query and toggle
+	_ = w.Bind("getAutoStartNative", func() bool {
+		return isAutoStartWindows()
+	})
 	_ = w.Bind("toggleAutoStartNative", func() bool {
 		return toggleAutoStartWindows()
 	})

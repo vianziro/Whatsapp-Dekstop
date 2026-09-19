@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -58,15 +59,109 @@ func TestDownloadInterceptorCoalescesDuplicateRequests(t *testing.T) {
 	for _, want := range []string{
 		"var activeDownloadKeys = Object.create(null)",
 		"function downloadRequestKey(href, filename)",
-		"var activeDownloadSizes = {}",
-		"if (blob.size && activeDownloadSizes[blob.size])",
 		"activeDownloadKeys[requestKey] = { status: 'downloading' }",
-		"markDownloadComplete(requestKey, savedPath, blob.size)",
+		"markDownloadComplete(requestKey, savedPath)",
 		"releaseDownloadRequest(requestKey)",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("download de-duplication is missing %q", want)
 		}
+	}
+}
+
+func TestExistingDownloadsAreDeduplicatedByContent(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"window.saveDownloadedFileNative(filename, base64data)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("content-based download reuse is missing %q", want)
+		}
+	}
+	if strings.Contains(script, "window.findDownloadedFileNative(filename)") {
+		t.Fatal("downloads must not be reused by filename before their content is verified")
+	}
+}
+
+func TestDuplicateDownloadToastReportsAlreadySaved(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"var savedDownloadPaths = Object.create(null)",
+		"var alreadySaved = savedDownloadPaths[savedPath] === true",
+		"savedDownloadPaths[savedPath] = true",
+		"'💾 File already saved: ' + filename",
+		"'📄 Already saved: ' + filename",
+		"'💾 Saved successfully: ' + filename",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("duplicate download feedback is missing %q", want)
+		}
+	}
+}
+
+func TestFilePickerUploadsDoNotTriggerDocumentPreview(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"function handleFileInputChange(e)",
+		"input.type !== 'file'",
+		"if (input.files && input.files.length > 0) lastUploadAt = Date.now();",
+		"document.addEventListener('change', handleFileInputChange, true)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("file-picker upload guard is missing %q", want)
+		}
+	}
+}
+
+func TestExplicitDocumentDownloadsDoNotAutoOpenPreview(t *testing.T) {
+	script := getInitScript("test-agent")
+	if strings.Count(script, "captureDownload(href, name, false)") < 2 {
+		t.Fatal("explicit document download paths must disable auto-preview")
+	}
+	for _, want := range []string{
+		"var lastExplicitDownloadAt = 0",
+		"function isRecentExplicitDownload()",
+		"!isRecentExplicitDownload()",
+		"function isExplicitDownloadMenuItem(target)",
+		"target.closest('[role=\"menuitem\"]')",
+		"target.closest(viewerDownloadSelector)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("explicit download preview guard is missing %q", want)
+		}
+	}
+}
+
+func TestSavedBadgeFollowsFilenameElement(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"function findFileNameElement(el)",
+		"function decorateItem(el, name, filenameEl)",
+		"var host = filenameEl || el.querySelector",
+		"if (name) decorateItem(row, name, findFileNameElement(row))",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("saved badge alignment is missing %q", want)
+		}
+	}
+}
+
+func TestDownloadFilenameResolutionAvoidsGenericNames(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"function cleanDownloadFilename(name)",
+		"function isPlaceholderDownloadFilename(name)",
+		"function filenameFromContentDisposition(header)",
+		"function resolveDownloadFilename(filename, contentDisposition)",
+		"Content-Disposition",
+		"whatsapp_file",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("download filename handling is missing %q", want)
+		}
+	}
+	if strings.Contains(script, "var name = downloadAttr || this.download || lastClickedDocName || 'whatsapp_media'") {
+		t.Fatal("download anchors must resolve generic filenames before saving")
 	}
 }
 
@@ -191,6 +286,23 @@ func TestSettingsControlsRemainWired(t *testing.T) {
 	}
 }
 
+func TestSettingsShortcutActionsKeepConsistentSpacing(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, shortcut := range []string{"+Shift+P", "+Shift+T", "+Shift+M", "+Shift+S"} {
+		idx := strings.Index(script, shortcut)
+		if idx < 0 {
+			t.Fatalf("settings shortcut %q not found", shortcut)
+		}
+		window := script[idx-500 : idx+500]
+		if !strings.Contains(window, "gap:12px;min-width:150px;flex-shrink:0") {
+			t.Errorf("shortcut %q is missing the spaced action layout", shortcut)
+		}
+		if !strings.Contains(window, "min-width:78px") {
+			t.Errorf("shortcut %q action button is missing a consistent minimum width", shortcut)
+		}
+	}
+}
+
 func TestSettingsAlwaysHasAnAccessibleEntryPoint(t *testing.T) {
 	script := getInitScript("test-agent")
 	start := strings.Index(script, "function injectHeaderToolbarBtn()")
@@ -218,19 +330,78 @@ func TestSettingsAlwaysHasAnAccessibleEntryPoint(t *testing.T) {
 	}
 }
 
-func TestPrivacyModeUsesSolidRedactionWithoutFuzzyTextShadow(t *testing.T) {
+func TestPrivacyModeUsesVisualBlurWithChatListHoverUnblur(t *testing.T) {
 	script := getInitScript("test-agent")
 	for _, want := range []string{
-		"background: rgba(134,150,160,.42)",
-		"text-shadow: none !important",
-		"border-radius: 3px",
+		"filter: blur(6px) !important",
+		"filter: none !important",
+		"[data-testid=\"msg-container\"]:hover",
+		"data-wa-privacy-hover",
+		"data-wa-privacy-reveal",
+		"function privacyChatRowFromTarget(target)",
+		"function markPrivacyHoverRow(row)",
+		"function updatePrivacyHoverFromTarget(target)",
+		"setProperty('filter', 'none', 'important')",
+		"div._ak8l",
 	} {
 		if !strings.Contains(script, want) {
-			t.Errorf("privacy redaction is missing %q", want)
+			t.Errorf("privacy blur styling is missing %q", want)
 		}
 	}
-	if strings.Contains(script, "text-shadow: 0 0 10px") {
-		t.Fatal("privacy mode must not render fuzzy text shadows")
+	if strings.Contains(script, "background: rgba(134,150,160") {
+		t.Fatal("privacy mode must use visual blur, not gray solid redaction boxes")
+	}
+	if strings.Contains(script, "#pane-side span:hover") {
+		t.Fatal("chat-list privacy reveal must remain scoped to the hovered chat container")
+	}
+	if strings.Contains(script, "#pane-side [role=\"row\"]:hover span") {
+		t.Fatal("chat-list privacy reveal must not depend on broad row hover selectors")
+	}
+	if !strings.Contains(script, "#pane-side [role=\"row\"] span,") {
+		t.Fatal("chat-list timestamps must be included in the privacy blur layer")
+	}
+	if !strings.Contains(script, "row.querySelectorAll('span, ._ak8q") {
+		t.Fatal("hover reveal must include timestamp spans")
+	}
+}
+
+func TestPrivacyModeCopyMatchesTimestampBlurBehavior(t *testing.T) {
+	script := getInitScript("test-agent")
+	if !strings.Contains(script, "Hide names, previews, timestamps & message text") {
+		t.Fatal("privacy mode copy must explain that timestamps are hidden")
+	}
+	if strings.Contains(script, "timestamps stay visible") {
+		t.Fatal("privacy mode copy must not claim timestamps stay visible")
+	}
+}
+
+func TestPrivacyModeCoversArchivedChatsAndAllAvatarVariants(t *testing.T) {
+	script := getInitScript("test-agent")
+	checks := []string{
+		// Sidebar & Archived chats text protection
+		"#side [role=\"row\"] span",
+		"#side [role=\"listitem\"] span",
+		"div[aria-label*=\"Archived\" i]",
+		// Avatar blur covers images, svg images, avatar container _ak8h, and default user SVGs
+		".privacy-mode.blur-avatars #side img",
+		".privacy-mode.blur-avatars #side image",
+		".privacy-mode.blur-avatars #side ._ak8h",
+		".privacy-mode.blur-avatars #side [data-testid=\"default-user\"]",
+		".privacy-mode.blur-avatars #side svg[viewBox=\"0 0 49 49\"]",
+		".privacy-mode.blur-avatars #side div.x78zum5 > div.x6s0dn4 > div",
+		".privacy-mode.blur-avatars #main header ._ak8h",
+		// Symmetrical hover unblur for row peek and direct avatar hover
+		"#side [role=\"row\"]:hover ._ak8h",
+		"#side [role=\"row\"]:hover image",
+		"#side ._ak8h:hover",
+		"#side ._ak8h:hover *",
+		// Sparing timestamps in #side (including archived view)
+		"tagTimesIn(document.getElementById('side') || document.getElementById('pane-side'))",
+	}
+	for _, want := range checks {
+		if !strings.Contains(script, want) {
+			t.Errorf("privacy rules missing required coverage for %q", want)
+		}
 	}
 }
 
@@ -264,6 +435,46 @@ func TestSettingsHelpUsesLocalDiagnosticsAndDocumentsShortcuts(t *testing.T) {
 	}
 }
 
+func TestUpdateProgressKeepsStatusTextInSync(t *testing.T) {
+	script := getInitScript("test-agent")
+	start := strings.Index(script, "window.onUpdateProgress = function(pct)")
+	end := strings.Index(script[start:], "window.onUpdateStatus = function(statusMsg)")
+	if start < 0 || end < 0 {
+		t.Fatal("update progress handlers not found")
+	}
+	progress := script[start : start+end]
+	for _, want := range []string{
+		"wa-update-progress-bar",
+		"wa-update-progress-pct",
+		"wa-update-text",
+		"Downloading update package... ' + pct + '%'",
+	} {
+		if !strings.Contains(progress, want) {
+			t.Errorf("update progress handler is missing %q", want)
+		}
+	}
+}
+
+func TestUpdaterErrorKeepsClearMessageAndRetryAction(t *testing.T) {
+	script := getInitScript("test-agent")
+	start := strings.Index(script, "window.onUpdateError = function(errMsg)")
+	end := strings.Index(script[start:], "// Manual Check Function")
+	if start < 0 || end < 0 {
+		t.Fatal("updater error handler not found")
+	}
+	errorHandler := script[start : start+end]
+	for _, want := range []string{
+		"Update failed: ",
+		"retry.textContent = 'Retry'",
+		"actions.style.display = 'flex'",
+		"prog.style.display = 'none'",
+	} {
+		if !strings.Contains(errorHandler, want) {
+			t.Errorf("updater recovery handler is missing %q", want)
+		}
+	}
+}
+
 func TestThemeSwitchDoesNotOverrideNativeMediaQueriesOrLoseUserChoice(t *testing.T) {
 	script := getInitScript("test-agent")
 	start := strings.Index(script, "// Theme Manager")
@@ -287,6 +498,40 @@ func TestThemeSwitchDoesNotOverrideNativeMediaQueriesOrLoseUserChoice(t *testing
 	}
 	if strings.Count(theme, "getAppThemeNative()") != 1 {
 		t.Fatal("saved theme must be requested once so stale async responses cannot overwrite a user click")
+	}
+}
+
+func TestMacMediaPermissionUXIncludesSettingsAndRetryControls(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"getCameraPermissionNative",
+		"getMicrophonePermissionNative",
+		"openMediaPrivacySettingsNative('camera')",
+		"wa-media-permission-settings",
+		"wa-media-permission-retry",
+		"Privacy & Security → Camera/Microphone",
+		"getUserMedia({ audio: true, video: true })",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("macOS media permission UX is missing %q", want)
+		}
+	}
+}
+
+func TestNotificationToggleGatesNativeNotificationsAcrossPlatforms(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"getNotificationsEnabledNative",
+		"setNotificationsEnabledNative",
+		"window.isNotificationsEnabled",
+		"window.setNotificationsEnabled",
+		"if (notificationsStateReady && notificationsEnabled && window.sendNativeNotification)",
+		"Desktop Notifications",
+		"wa-action-toggle-notifications",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("cross-platform notification toggle is missing %q", want)
+		}
 	}
 }
 
@@ -416,6 +661,19 @@ func TestClosingNativePDFReturnsToChat(t *testing.T) {
 	}
 	if !strings.Contains(getInitScript("test-agent"), "window.closeDocumentViewerAfterNativePreview = function()") {
 		t.Fatal("webview has no command that returns from the document viewer to chat")
+	}
+	script := getInitScript("test-agent")
+	start := strings.Index(script, "window.closeDocumentViewerAfterNativePreview = function()")
+	end := strings.Index(script[start:], "// Handle explicit user clicks on WhatsApp Web's Media Viewer")
+	if start < 0 || end < 0 {
+		t.Fatal("native preview close handler boundaries not found")
+	}
+	handler := script[start : start+end]
+	if !strings.Contains(handler, "document.querySelector('[data-testid=\"media-viewer\"]')") {
+		t.Fatal("native preview close handler must scope dismissal to WhatsApp's media viewer")
+	}
+	if strings.Contains(handler, "document.dispatchEvent(esc)") || strings.Contains(handler, "window.dispatchEvent(esc)") {
+		t.Fatal("native preview close handler must not dispatch a global Escape")
 	}
 }
 
@@ -642,5 +900,121 @@ func TestMediaViewerCloseButtonNotIntercepted(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("script is missing media viewer safeguard %q", want)
 		}
+	}
+}
+
+func TestEscapeChatPreservesFullscreen(t *testing.T) {
+	script := getInitScript("test-agent")
+	for _, want := range []string{
+		"waRunModule('escape-chat'",
+		"if (__WA_GOOS !== 'darwin') return;",
+		"nativeOverlayOpen()",
+		"activeChatHeader()",
+		"button[data-testid=\"back\"]",
+		"e.preventDefault()",
+		"e.stopImmediatePropagation()",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("Escape chat safeguard is missing %q", want)
+		}
+	}
+}
+
+func TestDragAndDropUploadStabilization(t *testing.T) {
+	script := getInitScript("test-agent")
+
+	checks := []string{
+		"isRecentUpload()",
+		"setFilesOnInput(fileInput, files)",
+		"findAttachButton()",
+		"findInputInOrNear(el)",
+		"findMediaInput()",
+		"findDocumentInput()",
+		"injectFiles(files, attempt",
+		"document.addEventListener('dragenter'",
+		"document.addEventListener('dragleave'",
+		"document.addEventListener('dragover'",
+		"document.addEventListener('drop'",
+		"DataTransfer()",
+		"fileInput.dispatchEvent(new Event('input'",
+		"fileInput.dispatchEvent(new Event('change'",
+		"stopImmediatePropagation",
+		"areAllMediaFiles(files)",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(script, want) {
+			t.Errorf("script is missing drag-and-drop safeguard %q", want)
+		}
+	}
+}
+
+func TestSettingsFallbackButtonsAreHarmonized(t *testing.T) {
+	script := getInitScript("test-agent")
+
+	// Both fallback buttons must use bottom:14px;left:14px; to avoid vertical shifting
+	if !strings.Contains(script, "id = 'wa-settings-fallback-btn'") {
+		t.Fatal("missing wa-settings-fallback-btn")
+	}
+	if !strings.Contains(script, "id = 'wa-emergency-settings-btn'") {
+		t.Fatal("missing wa-emergency-settings-btn")
+	}
+
+	for _, want := range []string{
+		"left:14px;bottom:14px;z-index:9999998;width:38px;height:38px",
+		"left:14px;bottom:14px;z-index:2147483646;width:38px;height:38px",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("expected button positioning %q in script", want)
+		}
+	}
+}
+
+func TestToastNotificationHasHighestZIndex(t *testing.T) {
+	script := getInitScript("test-agent")
+
+	// Toast popup must have maximum z-index (2147483647) to stay in front of settings overlay (9999999)
+	want := "id = 'wa-hud-toast';\n\t\t\t\ttoast.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(32,44,51,0.94);backdrop-filter:blur(10px);color:#00a884;border:1px solid rgba(0,168,132,0.4);border-radius:20px;padding:8px 20px;font-size:12.5px;font-weight:600;z-index:2147483647;"
+	if !strings.Contains(script, "z-index:2147483647") {
+		t.Errorf("toast notification must use z-index 2147483647 to prevent being hidden behind modal, got: %s", want)
+	}
+}
+
+func TestAutoStartStateRefreshesFromNative(t *testing.T) {
+	script := getInitScript("test-agent")
+
+	for _, want := range []string{
+		"window.getAutoStartNative",
+		"refreshAutoStartState",
+		"window.refreshAutoStartState",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("auto-start module missing %q", want)
+		}
+	}
+}
+
+func TestWindowStateMaximizedSerialization(t *testing.T) {
+	s := WindowState{
+		X:         100,
+		Y:         200,
+		Width:     1200,
+		Height:    800,
+		Maximized: true,
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("failed to marshal WindowState: %v", err)
+	}
+	if !strings.Contains(string(data), `"maximized":true`) {
+		t.Errorf("expected maximized in JSON, got: %s", string(data))
+	}
+
+	var parsed WindowState
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal WindowState: %v", err)
+	}
+	if !parsed.Maximized {
+		t.Errorf("expected parsed.Maximized to be true")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -26,7 +27,7 @@ type UIController interface {
 // builds override it with -ldflags "-X main.appVersion=X.Y.Z[.N]"; the literal
 // here is only the development fallback. UI strings must never hardcode a
 // version — they use the __WA_APP_VERSION__ placeholder replaced at runtime.
-var appVersion = "1.5.9.2"
+var appVersion = "1.5.9.7"
 
 const githubRepo = "vianziro/Whatsapp-Dekstop"
 
@@ -454,6 +455,7 @@ func executeUpdate(ui UIController, downloadURL string) error {
 	ext := updateDownloadExtension(downloadURL)
 	destFile := filepath.Join(os.TempDir(), "whatsapp_update_download"+ext)
 	_ = os.Remove(destFile)
+	defer os.Remove(destFile)
 
 	ui.Dispatch(func() {
 		ui.Eval("if (window.onUpdateStatus) { window.onUpdateStatus('Downloading update... 0%'); }")
@@ -465,6 +467,22 @@ func executeUpdate(ui UIController, downloadURL string) error {
 		})
 	})
 	if err != nil {
+		ui.Dispatch(func() {
+			ui.Eval(fmt.Sprintf("if (window.onUpdateError) { window.onUpdateError(%q); }", err.Error()))
+		})
+		return err
+	}
+
+	// Integrity gate: the downloaded artifact must match the SHA-256 published
+	// for this release before anything is executed or installed.
+	assetName := path.Base(downloadURL)
+	if i := strings.IndexAny(assetName, "?#"); i != -1 {
+		assetName = assetName[:i]
+	}
+	ui.Dispatch(func() {
+		ui.Eval("if (window.onUpdateStatus) { window.onUpdateStatus('Verifying download...'); }")
+	})
+	if err := verifyDownloadedChecksum(destFile, assetName, releaseBaseURLForAsset(downloadURL), checksumVerificationRequired); err != nil {
 		ui.Dispatch(func() {
 			ui.Eval(fmt.Sprintf("if (window.onUpdateError) { window.onUpdateError(%q); }", err.Error()))
 		})

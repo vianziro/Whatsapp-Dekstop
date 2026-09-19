@@ -109,12 +109,41 @@ func applyUpdateDarwin(zipPath string) error {
 		return fmt.Errorf("extracted app not found at %s", newAppPath)
 	}
 
-	// Prepare background swap and restart command
-	script := fmt.Sprintf(`(sleep 1 && rm -rf %q && cp -R %q %q && rm -rf %q %q && open %q) &`,
-		appBundle, newAppPath, appBundle, extractDir, zipPath, appBundle)
+	// Use a script with positional arguments instead of interpolating paths into
+	// shell source. App paths can contain spaces, quotes, $, or other shell
+	// metacharacters, and updates must not turn those paths into commands.
+	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("whatsapp_update_%d.sh", os.Getpid()))
+	logPath := filepath.Join(os.TempDir(), "WhatsAppDesk-update.log")
+	script := `#!/bin/sh
+set -eu
+old_app="$1"
+new_app="$2"
+extract_dir="$3"
+zip_path="$4"
+log_path="$5"
+script_path="$6"
+backup_path="${old_app}.old.$$"
+trap 'rm -f "$script_path"' EXIT
+{
+  sleep 1
+  mv "$old_app" "$backup_path"
+  if ! /usr/bin/ditto "$new_app" "$old_app"; then
+    rm -rf "$old_app"
+    mv "$backup_path" "$old_app"
+    echo "WhatsApp Desk update failed while copying the new app." > "$log_path"
+    exit 1
+  fi
+  rm -rf "$backup_path" "$extract_dir" "$zip_path"
+  /usr/bin/open "$old_app"
+} >> "$log_path" 2>&1
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {
+		return fmt.Errorf("failed to prepare update helper: %w", err)
+	}
 
-	cmd := exec.Command("sh", "-c", script)
+	cmd := exec.Command("/bin/sh", scriptPath, appBundle, newAppPath, extractDir, zipPath, logPath, scriptPath)
 	if err := cmd.Start(); err != nil {
+		_ = os.Remove(scriptPath)
 		return fmt.Errorf("failed to start restart script: %w", err)
 	}
 
