@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -63,6 +65,153 @@ func TestLinuxArm64UpdaterNeverFallsBackToX64(t *testing.T) {
 	}
 	if got := updateAssetForPlatform("linux", "arm64"); !strings.HasSuffix(got, "Linux-arm64.tar.gz") {
 		t.Fatalf("Linux arm64 stable asset URL = %q", got)
+	}
+}
+
+func TestFindLinuxAssetPrefersWebkit41WhenRequested(t *testing.T) {
+	release := &GitHubRelease{Assets: []GitHubAsset{
+		{Name: "WhatsApp-Desk-Linux-x64.tar.gz", BrowserDownloadURL: "https://example.test/x64.tar.gz"},
+		{Name: "WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz", BrowserDownloadURL: "https://example.test/x64-41.tar.gz"},
+	}}
+	if asset := findLinuxAsset(release, "x64", true); asset == nil || asset.Name != "WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz" {
+		t.Fatalf("preferWebkit41 must select the -webkit4.1 tarball, got %#v", asset)
+	}
+	if asset := findLinuxAsset(release, "x64", false); asset == nil || asset.Name != "WhatsApp-Desk-Linux-x64.tar.gz" {
+		t.Fatalf("without preference must keep the historical tarball, got %#v", asset)
+	}
+}
+
+func TestFindLinuxAssetFallsBackToPlain(t *testing.T) {
+	// Releases predating the 4.1 variant carry only the plain tarball; the
+	// preference must never turn into a "no update" on those releases.
+	release := &GitHubRelease{Assets: []GitHubAsset{
+		{Name: "WhatsApp-Desk-Linux-x64.tar.gz", BrowserDownloadURL: "https://example.test/x64.tar.gz"},
+	}}
+	if asset := findLinuxAsset(release, "x64", true); asset == nil || asset.Name != "WhatsApp-Desk-Linux-x64.tar.gz" {
+		t.Fatalf("missing -webkit4.1 asset must fall back to plain, got %#v", asset)
+	}
+}
+
+func TestFindLinuxAssetNeverFallsBackCrossArch(t *testing.T) {
+	release := &GitHubRelease{Assets: []GitHubAsset{
+		{Name: "WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz", BrowserDownloadURL: "https://example.test/x64-41.tar.gz"},
+	}}
+	if asset := findLinuxAsset(release, "arm64", true); asset != nil {
+		t.Fatalf("arm64 must never receive an x64 tarball, got %#v", asset)
+	}
+}
+
+func TestWebkitGTK40DetectorAgreesWithLdconfig(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("detector only probes on Linux")
+	}
+	if linuxLdconfigPath() == "" {
+		t.Skip("ldconfig not found")
+	}
+	out, err := exec.Command(linuxLdconfigPath(), "-p").Output()
+	if err != nil {
+		t.Skipf("ldconfig -p failed: %v", err)
+	}
+	want := strings.Contains(string(out), webkit40LibPrefix)
+	if got := webkitGTK40Present(); got != want {
+		t.Fatalf("webkitGTK40Present() = %v, ldconfig says %v", got, want)
+	}
+}
+
+func TestLinuxLdconfigPathIsAbsolute(t *testing.T) {
+	// A GUI-launched app may have a PATH without /sbin, so the probe must
+	// resolve an absolute path rather than rely on PATH alone.
+	got := linuxLdconfigPath()
+	if got == "" {
+		t.Skip("ldconfig not installed on this host")
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("ldconfig path %q must be absolute", got)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("resolved ldconfig %q is not usable: %v", got, err)
+	}
+}
+
+func TestLinuxLdconfigPathSurvivesEmptyPath(t *testing.T) {
+	// Regression: with a desktop-launcher PATH that omits /sbin and
+	// /usr/sbin, resolving ldconfig through PATH alone used to fail, and the
+	// fail-open fallback then hid the 4.1-only case this probe exists for.
+	if runtime.GOOS != "linux" {
+		t.Skip("ldconfig probe only applies to Linux")
+	}
+	t.Setenv("PATH", t.TempDir())
+	got := linuxLdconfigPath()
+	if got == "" {
+		if _, err := exec.LookPath("ldconfig"); err == nil {
+			t.Skip("ldconfig resolvable even without PATH lookup")
+		}
+		t.Skip("ldconfig not installed on this host")
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("ldconfig path %q must be absolute even with an empty PATH", got)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("resolved ldconfig %q is not usable: %v", got, err)
+	}
+}
+
+func TestWebkit40InDirsFindsLibrary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, webkit40LibPrefix+"0"), nil, 0644); err != nil {
+		t.Fatalf("seed fake library: %v", err)
+	}
+	found, anyReadable := webkit40InDirs([]string{dir})
+	if !found || !anyReadable {
+		t.Fatalf("webkit40InDirs() = (%v, %v), want (true, true)", found, anyReadable)
+	}
+}
+
+func TestWebkit40InDirsProvesAbsence(t *testing.T) {
+	// A readable directory without the library is evidence of absence — this
+	// is what lets the detector stop failing open on 4.1-only systems.
+	found, anyReadable := webkit40InDirs([]string{t.TempDir()})
+	if found {
+		t.Fatalf("webkit40InDirs() found a library in an empty directory")
+	}
+	if !anyReadable {
+		t.Fatalf("a readable directory must report anyReadable = true")
+	}
+}
+
+func TestWebkit40InDirsNoReadableDirIsInconclusive(t *testing.T) {
+	found, anyReadable := webkit40InDirs([]string{
+		filepath.Join(t.TempDir(), "does-not-exist"),
+	})
+	if found || anyReadable {
+		t.Fatalf("webkit40InDirs() = (%v, %v), want (false, false)", found, anyReadable)
+	}
+}
+
+func TestWebkit40SearchDirsCoverUsrMergeAndFedora(t *testing.T) {
+	dirs := strings.Join(webkit40SearchDirs(), " ")
+	for _, want := range []string{
+		"/usr/lib/x86_64-linux-gnu",
+		"/usr/lib/aarch64-linux-gnu",
+		"/usr/lib64",
+	} {
+		if !strings.Contains(dirs, want) {
+			t.Errorf("search dirs must include %s, got %s", want, dirs)
+		}
+	}
+}
+
+func TestLinuxStableAssetURLMatchesLocalWebkit(t *testing.T) {
+	got := updateAssetForPlatform("linux", "amd64")
+	wantVariant := runtime.GOOS == "linux" && !webkitGTK40Present()
+	if wantVariant && !strings.HasSuffix(got, "Linux-x64-webkit4.1.tar.gz") {
+		t.Fatalf("4.1-only host must get the -webkit4.1 URL, got %q", got)
+	}
+	if !wantVariant && !strings.HasSuffix(got, "Linux-x64.tar.gz") {
+		t.Fatalf("default host must keep the historical URL, got %q", got)
+	}
+	if !isAllowedUpdateURL(got) {
+		t.Fatalf("stable Linux URL %q must pass the updater allowlist", got)
 	}
 }
 
