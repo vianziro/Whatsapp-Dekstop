@@ -26,7 +26,7 @@ Get the latest stable release for your operating system (updated automatically):
 | :--- | :--- | :--- | :--- |
 | **macOS** | [**Universal DMG**](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.dmg) | [Universal ZIP](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.zip) | macOS 11.0+ (Apple Silicon & Intel) |
 | **Windows 10 / 11** | [**Setup Wizard (.exe)**](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Windows-x64-Setup.exe) | [Portable EXE](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe) | Windows 10/11 x64 (WebView2 runtime) |
-| **Linux** | [**Build from source**](#️-building--releasing) | [older releases (≤ v1.5.9.2)](https://github.com/vianziro/Whatsapp-Dekstop/releases) | GTK 3 & WebKitGTK 4.0 / 4.1 |
+| **Linux (x64)** | [**DEB (WebKitGTK 4.0, Ubuntu 22.04)**](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-amd64.deb) · [**DEB (WebKitGTK 4.1, Ubuntu 24.04+)**](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-amd64-webkit4.1.deb) | [tar.gz 4.0](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz) · [tar.gz 4.1](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz) | GTK 3 & WebKitGTK 4.0 / 4.1 |
 
 > [!TIP]
 > Download links point automatically to the latest release assets. You can also view all past versions and architectures on the [Releases](https://github.com/vianziro/Whatsapp-Dekstop/releases) page.
@@ -98,13 +98,14 @@ sudo dnf install ./WhatsApp-Desk-Fedora-x64.rpm
 ```
 
 > [!NOTE]
-> **Ubuntu 24.04 (Noble), Linux Mint 22.x:** these ship WebKitGTK 4.1 only, while the
-> default `WhatsApp-Desk-Linux-*.deb` links `libwebkit2gtk-4.0.so.37` and fails with
-> `cannot open shared object file` (issues #8, #9). Linux packages are not published on the
-> Releases page (see [Building & Releasing](#️-building--releasing)), so build the 4.1 variant
-> from source: `WA_DESK_WEBKIT=4.1 bash build_linux.sh`. Verify with:
-> `ldd dist_linux/whatsapp-desk | grep webkit` (expect `libwebkit2gtk-4.1.so.0`)
-> and `dpkg-deb -f <deb> Depends` (expect `libwebkit2gtk-4.1-0`).
+> **Ubuntu 24.04 (Noble), Linux Mint 22.x, Fedora 39+** ship WebKitGTK 4.1 only — use the
+> `-webkit4.1` assets: `WhatsApp-Desk-Linux-amd64-webkit4.1.deb` (or the portable
+> `WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz` on Fedora/RHEL, where DEB does not apply).
+> Older distros (Ubuntu 22.04, Debian 12) use the default 4.0 assets. Verify a package
+> before installing: `dpkg-deb -f <deb> Depends` (expect `libwebkit2gtk-4.1-0` for the 4.1
+> variant) and `ldd dist_linux/whatsapp-desk | grep webkit` for the portable archive.
+> RPM packages and arm64 Linux builds are not currently published; build them with
+> `bash build_linux.sh` (see [Building & Releasing](#️-building--releasing)).
 
 ### Verifying Release Integrity
 
