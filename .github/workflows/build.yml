@@ -108,6 +108,32 @@ jobs:
             WhatsApp-Desk-Linux-amd64.deb
             WhatsApp-Desk-Fedora-x64.rpm
 
+  # Opt-in WebKitGTK 4.1 variant for Ubuntu 24.04 Noble, Linux Mint 22.x and
+  # current Fedora. Added alongside (not replacing) the historical 4.0 jobs so
+  # Jammy/Debian support is unchanged. Related to issues #8 and #9.
+  linux-x64-webkit41:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install WebKitGTK 4.1 deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev rpm
+      - name: Build Linux packages (WebKit 4.1)
+        env:
+          WA_DESK_BUILD_RPM: "1"
+          WA_DESK_WEBKIT: "4.1"
+        run: bash build_linux.sh "${{ needs.prepare.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-webkit41
+          path: |
+            WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz
+            WhatsApp-Desk-Linux-amd64-webkit4.1.deb
+            WhatsApp-Desk-Fedora-x64-webkit4.1.rpm
+
   linux-arm64:
     needs: prepare
     # GitHub-hosted ARM runners are available for public repositories.
@@ -135,7 +161,7 @@ jobs:
             WhatsApp-Desk-Fedora-arm64.rpm
 
   publish:
-    needs: [prepare, macos, windows, linux-x64, linux-arm64]
+    needs: [prepare, macos, windows, linux-x64, linux-x64-webkit41, linux-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -157,9 +183,12 @@ jobs:
                    WhatsApp-Desk-macOS-Universal.zip \
                    WhatsApp-Desk-Linux-x64.tar.gz \
                    WhatsApp-Desk-Linux-amd64.deb \
+                   WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz \
+                   WhatsApp-Desk-Linux-amd64-webkit4.1.deb \
                    WhatsApp-Desk-Linux-arm64.tar.gz \
                    WhatsApp-Desk-Linux-arm64.deb \
                    WhatsApp-Desk-Fedora-x64.rpm \
+                   WhatsApp-Desk-Fedora-x64-webkit4.1.rpm \
                    WhatsApp-Desk-Fedora-arm64.rpm; do
             if [ -f "$f" ]; then
               sha256sum "$f" >> SHA256SUMS
@@ -185,7 +214,10 @@ jobs:
             release-assets/WhatsApp-Desk-macOS-Universal.zip
             release-assets/WhatsApp-Desk-Linux-x64.tar.gz
             release-assets/WhatsApp-Desk-Linux-amd64.deb
+            release-assets/WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz
+            release-assets/WhatsApp-Desk-Linux-amd64-webkit4.1.deb
             release-assets/WhatsApp-Desk-Linux-arm64.tar.gz
             release-assets/WhatsApp-Desk-Linux-arm64.deb
             release-assets/WhatsApp-Desk-Fedora-x64.rpm
+            release-assets/WhatsApp-Desk-Fedora-x64-webkit4.1.rpm
             release-assets/WhatsApp-Desk-Fedora-arm64.rpm

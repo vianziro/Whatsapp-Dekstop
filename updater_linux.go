@@ -13,6 +13,24 @@ import (
 	"strings"
 )
 
+// safeExtractMode sanitizes an archive entry mode for extraction. Archive
+// metadata is attacker-influenced, so setuid/setgid/sticky bits must never
+// reach the filesystem. Directories keep 0755; regular files keep 0644 plus
+// the owner-exec bit only when the archive marked the entry executable at
+// all (so the extracted updater binary stays runnable, but nothing can gain
+// elevated bits).
+func safeExtractMode(mode int64, isDir bool) os.FileMode {
+	m := os.FileMode(mode) & 0777
+	if isDir {
+		return 0755
+	}
+	perm := m & 0644
+	if m&0111 != 0 {
+		perm |= 0100
+	}
+	return perm
+}
+
 func extractTarGz(srcFile, destDir string) error {
 	f, err := os.Open(srcFile)
 	if err != nil {
@@ -46,10 +64,10 @@ func extractTarGz(srcFile, destDir string) error {
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			_ = os.MkdirAll(targetPath, 0755)
+			_ = os.MkdirAll(targetPath, safeExtractMode(header.Mode, true))
 		case tar.TypeReg:
 			_ = os.MkdirAll(filepath.Dir(targetPath), 0755)
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, safeExtractMode(header.Mode, false))
 			if err != nil {
 				return err
 			}

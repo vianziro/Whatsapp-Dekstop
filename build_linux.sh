@@ -6,6 +6,29 @@ DISPLAY_NAME="WhatsApp Desk"
 VERSION="${1:-${WA_DESK_VERSION:-1.5.9.3}}"
 OUTPUT_DIR="dist_linux"
 
+# WebKitGTK variant selector (opt-in, default unchanged).
+#   WA_DESK_WEBKIT=4.0  -> historical behavior: link against webkit2gtk-4.0
+#                          (Ubuntu 22.04 Jammy and older Debian).
+#   WA_DESK_WEBKIT=4.1  -> link against webkit2gtk-4.1 / libsoup-3.0
+#                          (Ubuntu 24.04 Noble, Linux Mint 22.x, current Fedora).
+# The default stays 4.0 so existing distros keep working; Noble+ users should
+# build with WA_DESK_WEBKIT=4.1. Related to issues #8 and #9.
+WEBKIT_VARIANT="${WA_DESK_WEBKIT:-4.0}"
+case "${WEBKIT_VARIANT}" in
+    4.0|4.1) ;;
+    *) echo "error: WA_DESK_WEBKIT must be 4.0 or 4.1, got '${WEBKIT_VARIANT}'" >&2; exit 2 ;;
+esac
+
+# Artifacts of the 4.1 variant carry a suffix so they can never overwrite or
+# be confused with the historical 4.0 artifacts. The DEB Depends of the 4.1
+# variant names only the library the binary is actually linked against.
+ARTIFACT_SUFFIX=""
+DEB_DEPENDS="libgtk-3-0, libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0"
+if [ "${WEBKIT_VARIANT}" = "4.1" ]; then
+    ARTIFACT_SUFFIX="-webkit4.1"
+    DEB_DEPENDS="libgtk-3-0, libwebkit2gtk-4.1-0"
+fi
+
 # Derive the target architecture from the Go toolchain instead of hardcoding it.
 # Hardcoding amd64 silently mislabelled arm64 builds: the .deb control file and
 # the artifact names claimed amd64 while the binary inside was aarch64.
@@ -18,25 +41,50 @@ case "${GOARCH_VALUE}" in
 esac
 echo "Target architecture: ${GOARCH_VALUE:-unknown} (deb: ${DEB_ARCH}, bundle: ${BUNDLE_ARCH})"
 
-echo "=== Building ${DISPLAY_NAME} for Linux ==="
+echo "=== Building ${DISPLAY_NAME} for Linux (WebKitGTK ${WEBKIT_VARIANT}) ==="
 
 # Check prerequisites on Linux host/CI
 if command -v pkg-config >/dev/null 2>&1; then
-    if ! pkg-config --exists gtk+-3.0 webkit2gtk-4.0 && ! pkg-config --exists webkit2gtk-4.1; then
-        echo "Warning: GTK3 and WebKit2GTK-4.0 development headers are required to build on Linux."
-        echo "Debian/Ubuntu: sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev"
-        echo "Fedora/RHEL:   sudo dnf install -y gtk3-devel webkit2gtk4.0-devel"
+    if [ "${WEBKIT_VARIANT}" = "4.1" ]; then
+        if ! pkg-config --exists gtk+-3.0 webkit2gtk-4.1; then
+            echo "Warning: GTK3 and WebKit2GTK-4.1 development headers are required for WA_DESK_WEBKIT=4.1."
+            echo "Debian/Ubuntu (24.04+): sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev"
+            echo "Fedora/RHEL:            sudo dnf install -y gtk3-devel webkit2gtk4.1-devel"
+        fi
+        # The vendored webview cgo requests the historical 4.0 pkg-config name.
+        # For the 4.1 variant, always alias it to the real 4.1 .pc file so the
+        # linker emits DT_NEEDED libwebkit2gtk-4.1.so.0 (verified via ldd).
+        # The vendor tree itself is left untouched; the alias lives in a temp
+        # dir that is removed on exit.
+        if pkg-config --exists webkit2gtk-4.1; then
+            WEBKIT_PC_DIR="$(pkg-config --variable=pcfiledir webkit2gtk-4.1)"
+            WEBKIT_PC_ALIAS_DIR_41="$(mktemp -d)"
+            ln -s "${WEBKIT_PC_DIR}/webkit2gtk-4.1.pc" "${WEBKIT_PC_ALIAS_DIR_41}/webkit2gtk-4.0.pc"
+            export PKG_CONFIG_PATH="${WEBKIT_PC_ALIAS_DIR_41}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+            trap 'rm -rf "${WEBKIT_PC_ALIAS_DIR_41:-/tmp/wa-desk-noop-41}" "${WEBKIT_PC_ALIAS_DIR:-/tmp/wa-desk-noop-40}"' EXIT
+            echo "WebKitGTK 4.1 variant: aliasing webkit2gtk-4.0.pc -> webkit2gtk-4.1.pc for this build only."
+        fi
+    else
+        if ! pkg-config --exists gtk+-3.0 webkit2gtk-4.0 && ! pkg-config --exists webkit2gtk-4.1; then
+            echo "Warning: GTK3 and WebKit2GTK development headers are required to build on Linux."
+            echo "Debian/Ubuntu (22.04): sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev"
+            echo "Debian/Ubuntu (24.04+): sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev (then build with WA_DESK_WEBKIT=4.1)"
+            echo "Fedora/RHEL:   sudo dnf install -y gtk3-devel webkit2gtk4.1-devel"
+        fi
+        # Legacy auto-alias, preserved verbatim for the default 4.0 path:
+        # hosts with only 4.1 (e.g. Fedora) can still compile, but the
+        # resulting binary is 4.1-linked while the generic artifact name and
+        # the transitional Depends suggest 4.0. Prefer WA_DESK_WEBKIT=4.1
+        # on such hosts (see issues #8 and #9).
+        if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.1; then
+            WEBKIT_PC_DIR="$(pkg-config --variable=pcfiledir webkit2gtk-4.1)"
+            WEBKIT_PC_ALIAS_DIR="$(mktemp -d)"
+            ln -s "${WEBKIT_PC_DIR}/webkit2gtk-4.1.pc" "${WEBKIT_PC_ALIAS_DIR}/webkit2gtk-4.0.pc"
+            export PKG_CONFIG_PATH="${WEBKIT_PC_ALIAS_DIR}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+            trap 'rm -rf "${WEBKIT_PC_ALIAS_DIR}"' EXIT
+            echo "Note: building default 4.0 path on a 4.1-only host via pc alias; for Ubuntu 24.04+/Mint 22.x use WA_DESK_WEBKIT=4.1 instead."
+        fi
     fi
-	# Fedora ships WebKitGTK 4.1 but the upstream webview package still asks
-	# pkg-config for the historical 4.0 name. Provide a build-time alias only;
-	# this links the produced binary against Fedora's real 4.1 library.
-	if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.1; then
-		WEBKIT_PC_DIR="$(pkg-config --variable=pcfiledir webkit2gtk-4.1)"
-		WEBKIT_PC_ALIAS_DIR="$(mktemp -d)"
-		ln -s "${WEBKIT_PC_DIR}/webkit2gtk-4.1.pc" "${WEBKIT_PC_ALIAS_DIR}/webkit2gtk-4.0.pc"
-		export PKG_CONFIG_PATH="${WEBKIT_PC_ALIAS_DIR}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-		trap 'rm -rf "${WEBKIT_PC_ALIAS_DIR}"' EXIT
-	fi
 fi
 
 if [ "${WA_DESK_USE_EXISTING_OUTPUT:-0}" = "1" ]; then
@@ -78,8 +126,8 @@ EOF
 fi
 
 # Create tar.gz release bundle
-echo "Creating release tarball (WhatsApp-Desk-Linux-${BUNDLE_ARCH}.tar.gz)..."
-TAR_BUNDLE="WhatsApp-Desk-Linux-${BUNDLE_ARCH}.tar.gz"
+echo "Creating release tarball (WhatsApp-Desk-Linux-${BUNDLE_ARCH}${ARTIFACT_SUFFIX}.tar.gz)..."
+TAR_BUNDLE="WhatsApp-Desk-Linux-${BUNDLE_ARCH}${ARTIFACT_SUFFIX}.tar.gz"
 rm -f "${TAR_BUNDLE}"
 tar -czf "${TAR_BUNDLE}" -C "${OUTPUT_DIR}" .
 
@@ -108,7 +156,7 @@ Version: ${VERSION}
 Architecture: ${DEB_ARCH}
 Maintainer: Community <contact@github.com>
 Installed-Size: 15000
-Depends: libgtk-3-0, libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0
+Depends: ${DEB_DEPENDS}
 Section: net
 Priority: optional
 Description: Lightweight WhatsApp Desktop Client
@@ -116,10 +164,10 @@ Description: Lightweight WhatsApp Desktop Client
  built with Go and native WebKit.
 EOF
 
-    dpkg-deb --build "${DEB_DIR}" "whatsapp-desk_${VERSION}_${DEB_ARCH}.deb"
-    cp "whatsapp-desk_${VERSION}_${DEB_ARCH}.deb" "WhatsApp-Desk-Linux-${DEB_ARCH}.deb"
+    dpkg-deb --build "${DEB_DIR}" "whatsapp-desk_${VERSION}_${DEB_ARCH}${ARTIFACT_SUFFIX}.deb"
+    cp "whatsapp-desk_${VERSION}_${DEB_ARCH}${ARTIFACT_SUFFIX}.deb" "WhatsApp-Desk-Linux-${DEB_ARCH}${ARTIFACT_SUFFIX}.deb"
     rm -rf "${DEB_DIR}"
-    echo "Created: whatsapp-desk_${VERSION}_${DEB_ARCH}.deb and WhatsApp-Desk-Linux-${DEB_ARCH}.deb"
+    echo "Created: whatsapp-desk_${VERSION}_${DEB_ARCH}${ARTIFACT_SUFFIX}.deb and WhatsApp-Desk-Linux-${DEB_ARCH}${ARTIFACT_SUFFIX}.deb"
 fi
 
 # Build a native Fedora/RHEL package when rpmbuild is available. The portable
@@ -158,9 +206,9 @@ install -m 644 ${SOURCE_ROOT}/icon.png %{buildroot}/usr/share/icons/hicolor/512x
 EOF
     rpmbuild -bb "${RPM_TOPDIR}/SPECS/${APP_NAME}.spec" --define "_topdir ${RPM_TOPDIR}"
     RPM_ARCH="$( [ "${GOARCH_VALUE}" = "arm64" ] && echo aarch64 || echo x86_64 )"
-    cp "${RPM_TOPDIR}/RPMS/${RPM_ARCH}/${APP_NAME}-${VERSION}-1"*.rpm "WhatsApp-Desk-Fedora-${BUNDLE_ARCH}.rpm"
+    cp "${RPM_TOPDIR}/RPMS/${RPM_ARCH}/${APP_NAME}-${VERSION}-1"*.rpm "WhatsApp-Desk-Fedora-${BUNDLE_ARCH}${ARTIFACT_SUFFIX}.rpm"
     rm -rf "${RPM_TOPDIR}"
-    echo "Created: WhatsApp-Desk-Fedora-${BUNDLE_ARCH}.rpm"
+    echo "Created: WhatsApp-Desk-Fedora-${BUNDLE_ARCH}${ARTIFACT_SUFFIX}.rpm"
 fi
 
 echo "Done! Linux artifacts ready in ${OUTPUT_DIR} and ${TAR_BUNDLE}."

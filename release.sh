@@ -1,8 +1,8 @@
 #!/bin/bash
 # Builds and publishes a release from this machine — no hosted CI required.
 #
-#   bash release.sh 1.5.9.7            build, checksum, publish
-#   bash release.sh 1.5.9.7 --dry-run  build and checksum only, publish nothing
+#   bash release.sh 1.5.9.9            build, checksum, publish
+#   bash release.sh 1.5.9.9 --dry-run  build and checksum only, publish nothing
 #   bash release.sh --check            verify toolchain and report what is missing
 #
 # What it does, in order:

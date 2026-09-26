@@ -5,7 +5,7 @@ Release notes on GitHub are generated from CHANGELOG.md so that the published
 release and the repository can never disagree about what changed. release.sh
 calls this before publishing.
 
-    python3 changelog_section.py 1.5.9.7 --notes-file /tmp/notes.md
+    python3 changelog_section.py 1.5.9.9 --notes-file /tmp/notes.md
 
 Writes the version's section body to --notes-file and prints the version's
 tagline (the leading "> ..." line, if any) to stdout, which release.sh appends

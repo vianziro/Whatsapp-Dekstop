@@ -1,6 +1,9 @@
 'use strict';
-// Executes the real injected init script against a WhatsApp-Web-shaped DOM and
-// asserts the invariant that no single failure locks the user out of Settings.
+// Executes the real injected init script against a WhatsApp-Web-shaped DOM.
+// Two invariants are asserted:
+//   1. no single failure locks the user out of Settings;
+//   2. the spreadsheet preview's HTML sanitizer neutralizes attribute-breakout
+//      payloads carried in cell values.
 //
 // Usage: node init_script_harness.js <path-to-init-script.js>
 // Exits 0 on pass. Prints a JSON {"skipped": "..."} line and exits 0 when jsdom
@@ -138,6 +141,56 @@ const cases = [
     }, script],
 ];
 
+// The spreadsheet preview builds its table with XLSX.utils.sheet_to_html, which
+// escapes cell text but writes the raw value into a data-v attribute. A cell
+// whose value contains a double quote closes that attribute and injects markup,
+// so the sanitizer wrapping it is a security boundary. Audit it here, in the
+// jsdom that is already loaded, instead of paying for a second jsdom startup in
+// the Go test.
+function checkSpreadsheetSanitizer() {
+  const failures = [];
+  const start = script.indexOf('function sanitizeSheetHtml(html) {');
+  if (start === -1) return ['sanitizeSheetHtml helper is missing from the init script'];
+  const end = script.indexOf('\n\t\t}\n', start);
+  if (end === -1) return ['sanitizeSheetHtml helper is truncated'];
+  const fn = script.slice(start, end + '\n\t\t}'.length);
+
+  const dom = new JSDOM('<!doctype html><html><body></body></html>');
+  const sanitize = new Function('document', 'return (' + fn + ')')(dom.window.document);
+
+  const BANNED = 'script,style,img,svg,iframe,frame,object,embed,link,meta,base,form,input,button,textarea,select,audio,video,source,track,math,template';
+  const audit = (html) => {
+    const d = new JSDOM('<!doctype html><html><body>' + html + '</body></html>');
+    const doc = d.window.document;
+    let bad = doc.querySelectorAll(BANNED).length;
+    doc.querySelectorAll('*').forEach((el) => {
+      for (const a of Array.from(el.attributes)) {
+        if (/^on/i.test(a.name) || /^(src|href|srcdoc|xlink:href)$/i.test(a.name)) bad++;
+      }
+    });
+    return bad;
+  };
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const payloads = [
+    '" onmouseover="alert(1)',
+    '"><img src=x onerror=alert(1)>',
+    '"><iframe src=javascript:alert(1)>',
+    '<svg onload=alert(1)>',
+  ];
+  for (const p of payloads) {
+    const cell = '<table id="wa-xlsx-table"><tr><td data-t="s" data-v="' + p + '" id="A1">' + esc(p) + '</td></tr></table>';
+    const bad = audit(sanitize(cell));
+    if (bad) failures.push(`cell ${JSON.stringify(p)} leaves ${bad} dangerous node(s)/attribute(s)`);
+    else console.log(`GREEN  ${'spreadsheet cell escaped'.padEnd(22)} payload=${JSON.stringify(p)}`);
+  }
+
+  const ok = sanitize('<table id="wa-xlsx-table"><tr><td id="A1">Revenue</td><td id="B1">42</td></tr></table>');
+  if (ok.indexOf('Revenue') === -1 || ok.indexOf('42') === -1) failures.push('sanitizer dropped legitimate cell text');
+  if (ok.indexOf('id="wa-xlsx-table"') === -1) failures.push('sanitizer dropped the table id');
+  return failures;
+}
+
 async function main() {
   let failures = 0;
   for (const [label, transform, envMutate, , head] of cases) {
@@ -165,11 +218,16 @@ async function main() {
     }
   }
 
+  for (const reason of checkSpreadsheetSanitizer()) {
+    failures++;
+    console.log(`RED    ${'spreadsheet sanitizer'.padEnd(22)} ${reason}`);
+  }
+
   if (failures) {
-    console.log(`\nFAIL: ${failures} scenario(s) leave the user with no (or duplicate) Settings entry point.`);
+    console.log(`\nFAIL: ${failures} scenario(s) leave the user with no (or duplicate) Settings entry point, or expose the spreadsheet preview.`);
     process.exit(1);
   }
-  console.log('\nPASS: no single injected-script failure removes the Settings entry point or the Ctrl+, shortcut.');
+  console.log('\nPASS: no single injected-script failure removes the Settings entry point or the Ctrl+, shortcut, and the spreadsheet sanitizer neutralizes cell markup.');
   process.exit(0);
 }
 

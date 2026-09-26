@@ -34,10 +34,28 @@ func crashLogPath() string {
 	}
 }
 
+// maxCrashLogBytes bounds wa_crash.log. Repeated panics (e.g. a poisoned
+// profile triggering the same crash every launch) must never grow the file
+// without end; one backup generation is kept for forensics.
+var maxCrashLogBytes int64 = 1 << 20
+
+// rotateCrashLog moves a full crash log aside to wa_crash.log.1 (dropping
+// any older backup) so the next report starts fresh.
+func rotateCrashLog() {
+	path := crashLogPath()
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= maxCrashLogBytes {
+		return
+	}
+	_ = os.Remove(path + ".1")
+	_ = os.Rename(path, path+".1")
+}
+
 func writeCrashReport(context string, recovered interface{}) {
 	stack := debug.Stack()
 	defer func() { _ = recover() }() // never let logging itself crash the app
 	_ = os.MkdirAll(filepath.Dir(crashLogPath()), 0755)
+	rotateCrashLog()
 	f, err := os.OpenFile(crashLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return

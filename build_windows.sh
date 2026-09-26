@@ -16,7 +16,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.5.9.7}"
+VERSION="${1:-1.5.9.9}"
 ARCH="${2:-amd64}"
 OUT="dist_win/WhatsAppDesk.exe"
 mkdir -p dist_win

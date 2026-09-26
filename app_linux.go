@@ -202,6 +202,17 @@ static void tray_show_window(void) {
 	}
 }
 
+// Builds a valid empty IconPixmap array ("a(iiay)"). Must use a
+// GVariantBuilder: g_variant_new_from_data() with a NULL buffer yields an
+// invalid value, and passing a GVariant* where a tuple format expects inline
+// array elements aborts the process (GLib-ERROR) as soon as a tray host
+// queries the property. Returns a floating reference.
+static GVariant* tray_empty_pixmap(void) {
+	GVariantBuilder builder;
+	g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iiay)"));
+	return g_variant_builder_end(&builder);
+}
+
 static GVariant* tray_get_property(GDBusConnection* conn, const gchar* sender, const gchar* object_path, const gchar* interface, const gchar* property, GError** error, gpointer user_data) {
 	(void)conn; (void)sender; (void)object_path; (void)user_data;
 	if (strcmp(interface, "org.kde.StatusNotifierItem") == 0) {
@@ -221,7 +232,7 @@ static GVariant* tray_get_property(GDBusConnection* conn, const gchar* sender, c
 			return g_variant_new_string("whatsapp-desk");
 		}
 		if (strcmp(property, "IconPixmap") == 0) {
-			return g_variant_new_from_data(G_VARIANT_TYPE("a(iiay)"), NULL, 0, TRUE, NULL, NULL);
+			return tray_empty_pixmap();
 		}
 		if (strcmp(property, "OverlayIconName") == 0) {
 			if (g_has_overlay && g_overlay_icon_name[0]) {
@@ -230,14 +241,16 @@ static GVariant* tray_get_property(GDBusConnection* conn, const gchar* sender, c
 			return g_variant_new_string("");
 		}
 		if (strcmp(property, "OverlayIconPixmap") == 0) {
-			return g_variant_new_from_data(G_VARIANT_TYPE("a(iiay)"), NULL, 0, TRUE, NULL, NULL);
+			return tray_empty_pixmap();
 		}
 		if (strcmp(property, "ToolTip") == 0) {
-			GVariant* empty = g_variant_new_from_data(G_VARIANT_TYPE("a(iiay)"), NULL, 0, TRUE, NULL, NULL);
+			GVariant* empty = tray_empty_pixmap();
 			char tip[96];
 			if (g_unread_count > 0) snprintf(tip, sizeof(tip), "%d unread message(s)", g_unread_count);
 			else snprintf(tip, sizeof(tip), "No unread messages");
-			return g_variant_new("(sa(iiay)ss)", "whatsapp-desk", empty, "WhatsApp Desk", tip);
+			// '@' consumes the floating pixmap ref; without it the pointer
+			// would be misread as inline array elements (see above).
+			return g_variant_new("(s@a(iiay)ss)", "whatsapp-desk", empty, "WhatsApp Desk", tip);
 		}
 	}
 	g_set_error(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property %s.%s", interface, property);
@@ -267,7 +280,11 @@ static void tray_method_call(GDBusConnection* conn, const gchar* sender, const g
 			GError* error = NULL;
 			GVariant* value = tray_get_property(conn, sender, object_path, iface, prop, &error, user_data);
 			if (error) {
-				g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, error->message);
+				// error->message must be a "%s" argument, never the format
+				// string itself: a property name containing '%' (reachable
+				// from any DBus client) would otherwise be interpreted as a
+				// format specifier (-Wformat-security).
+				g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "%s", error->message);
 				g_error_free(error);
 			} else {
 				g_dbus_method_invocation_return_value(invocation, g_variant_new_tuple(&value, 1));
@@ -860,6 +877,11 @@ func runApp() {
 	_ = w.Bind("chooseDownloadDirNative", func() string {
 		selected, err := chooseFolderDialog()
 		if err != nil || selected == "" {
+			return ""
+		}
+		// Fast-fail here (the shared saver and loadSettings re-validate
+		// anyway) so the UI never reports a sensitive folder as applied.
+		if err := validateDownloadDir(selected); err != nil {
 			return ""
 		}
 		s := loadSettings()

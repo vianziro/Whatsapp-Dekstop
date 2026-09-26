@@ -19,7 +19,68 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ## [Unreleased]
 
-Nothing yet.
+## [1.5.9.9] - 2026-09-26
+
+> Privacy Reliability, Linux Self-Update & Update Banner Fixes
+
+### Fixed
+
+- Privacy Mode keeps the Archived navigation row and guidance visible while blurring actual
+  archived chat rows, with localized Archived labels and bounded view-scoped scanning (#50, #52).
+- Linux self-updates prefer the `-webkit4.1` tarball on systems without the WebKitGTK 4.0
+  runtime, including GUI launchers whose PATH omits `ldconfig` locations, while preserving
+  architecture-safe fallback behavior (#55).
+- The update banner reserves layout space so it no longer covers the Archived header or back
+  button, and disconnects its resize observer when dismissed (#56).
+
+## [1.5.9.8] - 2026-09-22
+
+> Click Recovery, Multi-File Upload Hardening & WebKitGTK 4.1
+
+Six pull requests contributed by [@MAliffadlan](https://github.com/MAliffadlan) land here
+together, with the macOS and spreadsheet-preview follow-ups they needed to be mergeable.
+
+### Security
+
+- Self-update downloads are restricted to release artifacts of this repository served over
+  HTTPS from `github.com`, so a page script can no longer point the updater at an arbitrary
+  URL (#44).
+- The download folder is validated against system and autostart locations, including symlink
+  escapes and dangling symlinks, and the open-file bridge is jailed to the download folder and
+  the internal preview directory (#44).
+- Attacker-controlled strings in the in-app document preview are HTML-escaped (#47), and
+  spreadsheet cell values are sanitized before they reach the preview table — SheetJS escapes
+  cell text but writes the raw value into a `data-v` attribute, which a crafted cell could use
+  to inject markup (#47 follow-up).
+- Self-update archives no longer propagate elevated mode bits on extraction, and the DBus tray
+  handler passes its error message as a format argument rather than as the format string
+  (#45, #46).
+- Self-update downloads are capped at 512 MB and saved attachments at 1 GB, checked before
+  decoding so an oversized payload cannot exhaust memory (#49).
+
+### Fixed
+
+- Linux: opt-in WebKitGTK 4.1 build variant (`WA_DESK_WEBKIT=4.1`) for Ubuntu 24.04,
+  Linux Mint 22.x and current Fedora, with `-webkit4.1` artifacts and honest DEB
+  `Depends`. The default 4.0 build is unchanged. Related to #8, #9.
+- Linux: the StatusNotifierItem tray properties no longer abort the process on launch on
+  desktops with a tray watcher (#48).
+- `wa_crash.log` rotates past 1 MB with a single backup, so a crash loop can no longer grow it
+  without bound (#49).
+- macOS: the download-folder blocklist and the preview-directory check resolved only one side
+  of the comparison, so symlinked prefixes such as `/etc` and `/var` were never matched
+  (follow-up to #44).
+- A file drop that hit an excluded target (a dialog, the settings modal) or arrived with an
+  empty file list — cloud placeholder files such as OneDrive's are the common case — left the
+  drag-over highlight class stuck. That class disables pointer events across the whole app, so
+  clicks stopped responding (including selecting a contact from the @mention popup) while
+  typing and Enter kept working, until the app was restarted. The drag state is now reset on
+  every drop and again on `dragend` and window blur.
+- The drop fallback that waits for WhatsApp's native editor used a single 400 ms check; when
+  the editor mounted slower than that — common on Windows — the app injected the dropped files
+  a second time over the batch WhatsApp had already accepted, which could leave only one file
+  in the editor. The fallback now probes for several rounds and only injects when no editor
+  appeared during the whole window.
 
 ---
 
@@ -485,7 +546,9 @@ First production release under the WhatsApp Desk name.
 
 ---
 
-[Unreleased]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.7...HEAD
+[Unreleased]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.9...HEAD
+[1.5.9.9]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.8...v1.5.9.9
+[1.5.9.8]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.7...v1.5.9.8
 [1.5.9.7]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.6...v1.5.9.7
 [1.5.9.6]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.5...v1.5.9.6
 [1.5.9.5]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.4...v1.5.9.5

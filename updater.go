@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -27,7 +29,7 @@ type UIController interface {
 // builds override it with -ldflags "-X main.appVersion=X.Y.Z[.N]"; the literal
 // here is only the development fallback. UI strings must never hardcode a
 // version — they use the __WA_APP_VERSION__ placeholder replaced at runtime.
-var appVersion = "1.5.9.7"
+var appVersion = "1.5.9.9"
 
 const githubRepo = "vianziro/Whatsapp-Dekstop"
 
@@ -147,18 +149,151 @@ func findAssetForPlatform(release *GitHubRelease, goos, goarch string) *GitHubAs
 		if goarch == "arm64" || goarch == "aarch64" {
 			bundleArch = "arm64"
 		}
-		for _, preferred := range []string{
-			"WhatsApp-Desk-Linux-" + bundleArch + ".tar.gz",
-			"WhatsApp-Linux-" + bundleArch + ".tar.gz",
-		} {
-			for i := range release.Assets {
-				if strings.EqualFold(release.Assets[i].Name, preferred) {
-					return &release.Assets[i]
-				}
-			}
-		}
+		// On a 4.1-only system (Ubuntu 24.04+, Mint 22.x, Fedora 39+) the
+		// historical 4.0-linked tarball cannot start, so prefer the
+		// -webkit4.1 artifact when the release carries one. The preference is
+		// only computed for the OS actually running this process; cross-OS
+		// queries (and the unit tests) keep the historical behavior.
+		preferWebkit41 := goos == runtime.GOOS && bundleArch == "x64" && !webkitGTK40Present()
+		return findLinuxAsset(release, bundleArch, preferWebkit41)
 		// Do not use a broad Linux archive fallback here. It previously selected
 		// x64 on arm64 machines merely because it was the only archive present.
+	}
+	return nil
+}
+
+// webkitGTK40Present reports whether the WebKitGTK 4.0 runtime library is
+// available on this Linux system.
+//
+// Two independent signals are consulted, and absence is only reported when the
+// filesystem scan proves it:
+//
+//  1. the dynamic loader cache, via `ldconfig -p`;
+//  2. a direct listing of the well-known library directories.
+//
+// ldconfig is resolved through absolute paths as well as PATH, because a
+// GUI-launched app does not always inherit /sbin or /usr/sbin in its PATH —
+// desktop launchers and non-systemd sessions routinely omit them. Resolving
+// only through PATH made the loader probe fail on exactly the 4.1-only
+// systems this check exists for, and the fail-open fallback then silently kept
+// selecting the 4.0 artifact.
+//
+// The fail-open result (reporting 4.0 as present) is reserved for genuinely
+// inconclusive cases: no usable ldconfig *and* no readable library directory,
+// so no signal could be gathered. It can therefore never be worse than the
+// behaviour before this check existed. Non-Linux builds always report true.
+func webkitGTK40Present() bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+
+	if path := linuxLdconfigPath(); path != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := exec.CommandContext(ctx, path, "-p").Output()
+		cancel()
+		if err == nil && strings.Contains(string(out), webkit40LibPrefix) {
+			return true
+		}
+	}
+
+	// Either ldconfig was unavailable, or it reported no match. Scan the
+	// library directories as a second opinion: it also covers a 4.0 library
+	// that is reachable through LD_LIBRARY_PATH but absent from the cache.
+	found, anyReadable := webkit40InDirs(webkit40SearchDirs())
+	if found {
+		return true
+	}
+	if anyReadable {
+		// Direct filesystem evidence: a readable directory that holds no
+		// WebKitGTK 4.0 library, which the loader cache also did not list.
+		return false
+	}
+	// Genuinely inconclusive — no usable ldconfig and no readable library
+	// directory — so stay fail-open and keep the historical artifact.
+	return true
+}
+
+const webkit40LibPrefix = "libwebkit2gtk-4.0.so"
+
+// linuxLdconfigPath resolves the ldconfig binary, preferring PATH and falling
+// back to the absolute locations it ships in. Returns "" when it cannot be
+// found or is not executable.
+func linuxLdconfigPath() string {
+	candidates := make([]string, 0, 5)
+	if path, err := exec.LookPath("ldconfig"); err == nil && path != "" {
+		candidates = append(candidates, path)
+	}
+	candidates = append(candidates,
+		"/sbin/ldconfig",
+		"/usr/sbin/ldconfig",
+		"/bin/ldconfig",
+		"/usr/bin/ldconfig",
+	)
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// webkit40SearchDirs lists the directories WebKitGTK 4.0 is installed into by
+// the distributions this project targets, including the usrmerge symlinks and
+// the Fedora multiarch location.
+func webkit40SearchDirs() []string {
+	return []string{
+		"/usr/lib/x86_64-linux-gnu",
+		"/lib/x86_64-linux-gnu",
+		"/usr/lib/aarch64-linux-gnu",
+		"/lib/aarch64-linux-gnu",
+		"/usr/lib64",
+		"/usr/lib",
+		"/lib",
+	}
+}
+
+// webkit40InDirs reports whether any of dirs contains a WebKitGTK 4.0 shared
+// object, and whether at least one directory could be read. The second value
+// is what makes a negative first value meaningful: a readable directory that
+// holds no such library is evidence of absence, while a set of unreadable
+// directories proves nothing.
+func webkit40InDirs(dirs []string) (found, anyReadable bool) {
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		anyReadable = true
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), webkit40LibPrefix) {
+				return true, true
+			}
+		}
+	}
+	return false, anyReadable
+}
+
+// findLinuxAsset selects the self-update tarball for a Linux bundleArch.
+// When preferWebkit41 is set, the -webkit4.1 artifact wins if present and the
+// historical 4.0-named tarball remains the fallback, so releases that predate
+// the 4.1 variant keep working. Cross-arch fallback is still refused: an
+// arm64 request never receives an x64 binary.
+func findLinuxAsset(release *GitHubRelease, bundleArch string, preferWebkit41 bool) *GitHubAsset {
+	names := []string{
+		"WhatsApp-Desk-Linux-" + bundleArch + ".tar.gz",
+		"WhatsApp-Linux-" + bundleArch + ".tar.gz",
+	}
+	if preferWebkit41 {
+		names = append([]string{"WhatsApp-Desk-Linux-" + bundleArch + "-webkit4.1.tar.gz"}, names...)
+	}
+	for _, preferred := range names {
+		for i := range release.Assets {
+			if strings.EqualFold(release.Assets[i].Name, preferred) {
+				return &release.Assets[i]
+			}
+		}
 	}
 	return nil
 }
@@ -196,6 +331,13 @@ func updateAssetForPlatform(goos, goarch string) string {
 	case "linux":
 		if goarch == "arm64" || goarch == "aarch64" {
 			return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-Linux-arm64.tar.gz"
+		}
+		// Primary update path uses this static URL (no API asset list), so it
+		// needs the same variant preference: on a 4.1-only system the plain
+		// 4.0-linked tarball cannot start. arm64 has no -webkit4.1 artifact,
+		// and cross-OS queries keep the historical URL.
+		if goos == runtime.GOOS && !webkitGTK40Present() {
+			return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-Linux-x64-webkit4.1.tar.gz"
 		}
 		return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz"
 	}
@@ -365,6 +507,11 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// maxUpdateDownloadBytes bounds self-update downloads. Genuine release
+// artifacts are tens of megabytes; anything far beyond that is either a
+// compromised endpoint or a disk-fill attempt, never a legitimate update.
+var maxUpdateDownloadBytes int64 = 512 << 20
+
 func downloadFileWithProgress(url, destPath string, onProgress func(int)) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -382,6 +529,11 @@ func downloadFileWithProgress(url, destPath string, onProgress func(int)) error 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with HTTP %d", resp.StatusCode)
 	}
+	// Fast path: a truthful Content-Length above the cap fails before a
+	// single byte hits the disk.
+	if resp.ContentLength > maxUpdateDownloadBytes {
+		return fmt.Errorf("download rejected: declared size %d exceeds %d-byte limit", resp.ContentLength, maxUpdateDownloadBytes)
+	}
 
 	out, err := os.Create(destPath)
 	if err != nil {
@@ -394,8 +546,21 @@ func downloadFileWithProgress(url, destPath string, onProgress func(int)) error 
 		onProgress: onProgress,
 	}
 
-	_, err = io.Copy(out, io.TeeReader(resp.Body, pw))
-	return err
+	// Slow path: Content-Length may lie or be absent (chunked), so cap the
+	// body itself. The +1 detects overflow; a partial file never survives.
+	// (Closed explicitly before Remove: Windows cannot delete an open file.)
+	n, err := io.Copy(out, io.LimitReader(io.TeeReader(resp.Body, pw), maxUpdateDownloadBytes+1))
+	if err != nil {
+		_ = out.Close()
+		_ = os.Remove(destPath)
+		return err
+	}
+	if n > maxUpdateDownloadBytes {
+		_ = out.Close()
+		_ = os.Remove(destPath)
+		return fmt.Errorf("download rejected: size exceeds %d-byte limit", maxUpdateDownloadBytes)
+	}
+	return nil
 }
 
 // windowsUpdateBatch is kept platform-neutral so the restart contract can be
@@ -443,6 +608,29 @@ del /f /q "%%~f0" >NUL 2>&1
 `, pid, newExePath, execPath)
 }
 
+// isAllowedUpdateURL reports whether downloadURL is a legitimate self-update
+// payload location. The URL arrives via the JS bridge (startUpdateNative), so
+// it must never be trusted blindly: only release artifacts of this repository
+// served over HTTPS from github.com are accepted. Redirects to GitHub's own
+// asset CDN are followed later by the downloader itself, so the bridge never
+// needs to accept any other host.
+func isAllowedUpdateURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u == nil {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "github.com" {
+		return false
+	}
+	// e.g. /vianziro/Whatsapp-Dekstop/releases/download/v1.2.3/...
+	// or /vianziro/Whatsapp-Dekstop/releases/latest/download/...
+	return strings.HasPrefix(strings.ToLower(u.Path), "/vianziro/whatsapp-dekstop/releases/")
+}
+
 func executeUpdate(ui UIController, downloadURL string) error {
 	if !updateExecutionMu.TryLock() {
 		ui.Dispatch(func() {
@@ -451,6 +639,17 @@ func executeUpdate(ui UIController, downloadURL string) error {
 		return nil
 	}
 	defer updateExecutionMu.Unlock()
+
+	// The download URL is attacker-reachable through the JS bridge, so reject
+	// anything outside our own GitHub release artifacts before any network
+	// or filesystem side effect happens.
+	if !isAllowedUpdateURL(downloadURL) {
+		err := fmt.Errorf("update rejected: URL is not a WhatsApp Desk GitHub release artifact")
+		ui.Dispatch(func() {
+			ui.Eval(fmt.Sprintf("if (window.onUpdateError) { window.onUpdateError(%q); }", err.Error()))
+		})
+		return err
+	}
 
 	ext := updateDownloadExtension(downloadURL)
 	destFile := filepath.Join(os.TempDir(), "whatsapp_update_download"+ext)
