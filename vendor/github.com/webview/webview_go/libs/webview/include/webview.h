@@ -1746,22 +1746,53 @@ public:
     // without the host having to re-register anything.
     id preserved_manager = m_manager;
 
-    if (previous_view == objc::msg_send<id>(m_window, "contentView"_sel)) {
-      objc::msg_send<void>(m_window, "setContentView:"_sel, nullptr);
-    }
-
+    // Build the replacement BEFORE touching the view hierarchy. The website
+    // data store is chosen at creation time, and while the fresh view is
+    // constructed nothing on screen changes, so the window never shows an
+    // empty content view - that blank frame was the "blink" users saw on
+    // every account switch.
     m_webview = nullptr;
     m_manager = nullptr;
     set_up_web_view(preserved_manager);
     if (!m_webview) {
+      // Nothing was removed yet; keep the previous view installed and report
+      // failure so the caller can fall back to a full WebView rebuild.
+      m_webview = previous_view;
+      m_manager = preserved_manager;
       return;
     }
 
+    // Install the replacement as the content view (the window auto-sizes
+    // it), then put the old view back ON TOP of it. The current account's
+    // page keeps covering the window until the fresh view's layer paints,
+    // and the swap reads as an in-page reload instead of a flash to white.
     objc::msg_send<void>(m_window, "setContentView:"_sel, m_webview);
+    id content = objc::msg_send<id>(m_window, "contentView"_sel);
+    // Ignore clicks while the old view is parked on top: they would land on
+    // the outgoing account's page.
+    objc::msg_send<void>(previous_view, "setUserInteractionEnabled:"_sel,
+                         false);
+    // NSWindowAbove == 1.
+    objc::msg_send<void>(content, "addSubview:positioned:relativeTo:"_sel,
+                         previous_view, 1, m_webview);
 
-    // Released only once the replacement is installed, so the window is never
-    // left without a content view mid-switch.
-    objc::msg_send<void>(previous_view, "release"_sel);
+    // Deferred teardown of the old view. Captureless lambda converts to a
+    // plain function pointer, so no Objective-C blocks are needed. Ownership
+    // stays balanced: the view carries +1 from alloc (dropped here) and +1
+    // from its superview (dropped by removeFromSuperview).
+    struct leftover_view {
+      id view;
+    };
+    auto *leftover = new leftover_view{previous_view};
+    dispatch_after_f(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), leftover,
+        [](void *arg) {
+          auto *lv = static_cast<leftover_view *>(arg);
+          objc::msg_send<void>(lv->view, "removeFromSuperview"_sel);
+          objc::msg_send<void>(lv->view, "release"_sel);
+          delete lv;
+        });
   }
   void run_impl() override {
     auto app = get_shared_application();
@@ -2088,16 +2119,45 @@ private:
       }
 
       // Older macOS/iOS (or a malformed identifier) has no named-persistent
-      // store API at all. Falling through to the shared default store would
-      // silently defeat isolation (a second account would see the first
-      // account's chats). An ephemeral, in-memory store guarantees isolation
-      // instead; the trade-off is that account only stays signed in for the
-      // life of this run and needs a fresh QR pairing after a full app quit.
+      // store API at all. WebKit's _WKWebsiteDataStoreConfiguration SPI can
+      // still build one: initWithIdentifier: plus WKWebsiteDataStore
+      // _initWithConfiguration: create exactly the per-identifier persistent
+      // store that macOS 14's public +dataStoreForIdentifier: wraps
+      // (verified on macOS 13.7: the complete store tree appears under
+      // ~/Library/WebKit/<bundle-id>/WebsiteDataStore/<uuid>/, and the store
+      // keeps its contents across relaunches). Without it the second account
+      // would lose its pairing on every quit.
       bool used_ephemeral = false;
       if (!store) {
-        store = objc::msg_send<id>("WKWebsiteDataStore"_cls,
-                                   "nonPersistentDataStore"_sel);
-        used_ephemeral = true;
+        id spi_cfg = objc::msg_send<id>(
+            objc_getClass("_WKWebsiteDataStoreConfiguration"), "alloc"_sel);
+        if (spi_cfg) {
+          auto spi_uuid = objc::autoreleased(objc::msg_send<id>(
+              objc::msg_send<id>("NSUUID"_cls, "alloc"_sel),
+              "initWithUUIDString:"_sel,
+              objc::msg_send<id>("NSString"_cls, "stringWithUTF8String:"_sel,
+                                 profile_identifier)));
+          spi_cfg = spi_uuid ? objc::msg_send<id>(
+                                   spi_cfg, "initWithIdentifier:"_sel,
+                                   spi_uuid)
+                             : nullptr;
+        }
+        if (spi_cfg) {
+          id spi_store = objc::msg_send<id>(
+              objc::msg_send<id>("WKWebsiteDataStore"_cls, "alloc"_sel),
+              "_initWithConfiguration:"_sel, spi_cfg);
+          // The store either copied or retained the configuration; our own
+          // +1 is dropped either way.
+          objc::msg_send<void>(spi_cfg, "release"_sel);
+          if (spi_store) {
+            store = objc::autoreleased(spi_store);
+          }
+        }
+        if (!store) {
+          store = objc::msg_send<id>("WKWebsiteDataStore"_cls,
+                                     "nonPersistentDataStore"_sel);
+          used_ephemeral = true;
+        }
       }
 
       if (store) {
