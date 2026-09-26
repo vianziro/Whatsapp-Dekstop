@@ -15,7 +15,7 @@
 ;
 ; Build from the repo root:
 ;   python3 installer/windows/make_wizard_assets.py
-;   makensis -DVERSION=1.5.9.8 -DAPPEXE_PATH=dist_win\WhatsAppDesk.exe installer\windows\WhatsAppDesk.nsi
+;   makensis -DVERSION=1.5.9.9 -DAPPEXE_PATH=dist_win\WhatsAppDesk.exe installer\windows\WhatsAppDesk.nsi
 ; Output: WhatsApp-Desk-Windows-x64-Setup.exe (repo root).
 
 Target x86-ansi
@@ -27,7 +27,7 @@ Target x86-ansi
 !define APPEXE "WhatsAppDesk.exe"
 
 !ifndef VERSION
-!define VERSION "1.5.9.8"
+!define VERSION "1.5.9.9"
 !endif
 
 ; Path to the built binary. Overridable so release automation can point at the

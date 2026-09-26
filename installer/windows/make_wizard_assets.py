@@ -98,7 +98,7 @@ def build_welcome():
         y += 15
 
     # Version chip: reads as metadata, not as a marketing badge.
-    chip = "v" + os.environ.get("WA_DESK_VERSION", "1.5.9.8")
+    chip = "v" + os.environ.get("WA_DESK_VERSION", "1.5.9.9")
     cw = d.textlength(chip, font=tiny_font) + 18
     cx0 = (w - cw) / 2
     rounded_rect(d, [cx0, 198, cx0 + cw, 220], radius=11, fill=LAYER)

@@ -270,9 +270,9 @@ func TestIsAllowedUpdateURL(t *testing.T) {
 	allowed := []string{
 		"https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsAppDesk.exe",
 		"https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-Linux-x64.tar.gz",
-		"https://github.com/vianziro/Whatsapp-Dekstop/releases/download/v1.5.9.8/WhatsApp-Desk-macOS-Universal.zip",
+		"https://github.com/vianziro/Whatsapp-Dekstop/releases/download/v1.5.9.9/WhatsApp-Desk-macOS-Universal.zip",
 		// Query strings must not bypass the check.
-		"https://github.com/vianziro/Whatsapp-Dekstop/releases/download/v1.5.9.8/WhatsAppDesk.exe?token=abc",
+		"https://github.com/vianziro/Whatsapp-Dekstop/releases/download/v1.5.9.9/WhatsAppDesk.exe?token=abc",
 	}
 	for _, u := range allowed {
 		if !isAllowedUpdateURL(u) {

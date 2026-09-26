@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the production Windows installer: GUI binary + branded NSIS setup.
 #
-#   bash build_windows_installer.sh 1.5.9.8
+#   bash build_windows_installer.sh 1.5.9.9
 #
 # Produces:
 #   dist_win/WhatsAppDesk.exe                 portable single-file app
@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.5.9.8}"
+VERSION="${1:-1.5.9.9}"
 
 echo "== 1/3 building Windows binary (v${VERSION}) =="
 bash build_windows.sh "$VERSION"

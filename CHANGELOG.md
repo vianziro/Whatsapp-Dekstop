@@ -19,12 +19,19 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ## [Unreleased]
 
+## [1.5.9.9] - 2026-09-26
+
+> Privacy Reliability, Linux Self-Update & Update Banner Fixes
+
 ### Fixed
 
-- Keep the Archived navigation row visible while blurring actual chat rows in Privacy Mode (#50).
-- Linux: the self-updater prefers the `-webkit4.1` tarball on systems without the
-  WebKitGTK 4.0 runtime (Ubuntu 24.04+, Mint 22.x, Fedora 39+), falling back to the
-  historical artifact otherwise and never across architectures. Related to #8, #9.
+- Privacy Mode keeps the Archived navigation row and guidance visible while blurring actual
+  archived chat rows, with localized Archived labels and bounded view-scoped scanning (#50, #52).
+- Linux self-updates prefer the `-webkit4.1` tarball on systems without the WebKitGTK 4.0
+  runtime, including GUI launchers whose PATH omits `ldconfig` locations, while preserving
+  architecture-safe fallback behavior (#55).
+- The update banner reserves layout space so it no longer covers the Archived header or back
+  button, and disconnects its resize observer when dismissed (#56).
 
 ## [1.5.9.8] - 2026-09-22
 
@@ -539,7 +546,8 @@ First production release under the WhatsApp Desk name.
 
 ---
 
-[Unreleased]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.8...HEAD
+[Unreleased]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.9...HEAD
+[1.5.9.9]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.8...v1.5.9.9
 [1.5.9.8]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.7...v1.5.9.8
 [1.5.9.7]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.6...v1.5.9.7
 [1.5.9.6]: https://github.com/vianziro/Whatsapp-Dekstop/compare/v1.5.9.5...v1.5.9.6
