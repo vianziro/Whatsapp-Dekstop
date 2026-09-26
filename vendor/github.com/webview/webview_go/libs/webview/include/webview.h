@@ -1766,12 +1766,11 @@ public:
     // it), then put the old view back ON TOP of it. The current account's
     // page keeps covering the window until the fresh view's layer paints,
     // and the swap reads as an in-page reload instead of a flash to white.
+    // Clicks landing on the parked page for this brief window are harmless:
+    // the view is discarded right after. (NSView has no userInteractionEnabled
+    // - that is a UIView API - and sending it here aborts the process.)
     objc::msg_send<void>(m_window, "setContentView:"_sel, m_webview);
     id content = objc::msg_send<id>(m_window, "contentView"_sel);
-    // Ignore clicks while the old view is parked on top: they would land on
-    // the outgoing account's page.
-    objc::msg_send<void>(previous_view, "setUserInteractionEnabled:"_sel,
-                         false);
     // NSWindowAbove == 1.
     objc::msg_send<void>(content, "addSubview:positioned:relativeTo:"_sel,
                          previous_view, 1, m_webview);
