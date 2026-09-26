@@ -2383,7 +2383,14 @@ func getInitScript(ua string) string {
 				autoLocked = false;
 				applyPrivacyMode(false, true);
 			}
-			function resetIdleTimer() {
+			// mousemove fires continuously; re-arming the idle timer on every
+			// event burns the main thread during cursor travel. A few resets
+			// per second are more than enough for an idle timeout of minutes.
+			var lastIdleReset = 0;
+			function resetIdleTimer(force) {
+				var now = Date.now();
+				if (!force && now - lastIdleReset < 3000) return;
+				lastIdleReset = now;
 				if (autoLocked) unlockFromIdle();
 				clearTimeout(idleTimer);
 				if (autoLockEnabled) idleTimer = setTimeout(lockForIdle, IDLE_MS);
@@ -2395,12 +2402,12 @@ func getInitScript(ua string) string {
 			});
 			// Losing window focus is the strongest "stepping away" signal.
 			window.addEventListener('blur', function() { if (autoLockEnabled) lockForIdle(); });
-			window.addEventListener('focus', function() { resetIdleTimer(); });
+			window.addEventListener('focus', function() { resetIdleTimer(true); });
 			document.addEventListener('visibilitychange', function() {
 				if (document.hidden) { if (autoLockEnabled) lockForIdle(); }
-				else resetIdleTimer();
+				else resetIdleTimer(true);
 			});
-			resetIdleTimer();
+			resetIdleTimer(true);
 
 			window.addEventListener('keydown', function(e) {
 				if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'p' || e.key === 'P')) {
@@ -2911,13 +2918,15 @@ func getInitScript(ua string) string {
 				// A gentle full-window veil on the outgoing page. While the native
 				// swap parks this page on top for a beat, the veil reads as an
 				// intentional transition instead of a frozen page. Pure CSS, no
-				// timers; it dies with this page when the new engine takes over.
+				// backdrop-filter (that would force expensive offscreen compositing
+				// while two webviews are briefly alive). No timers; it dies with
+				// this page when the new engine takes over.
 				var existing = document.getElementById('wa-switch-veil');
 				if (existing) return;
 				var veil = document.createElement('div');
 				veil.id = 'wa-switch-veil';
 				veil.setAttribute('aria-hidden', 'true');
-				veil.style.cssText = 'position:fixed;inset:0;z-index:2147483600;background:rgba(11,20,26,.5);backdrop-filter:saturate(80%);opacity:0;transition:opacity 180ms ease;pointer-events:none;';
+				veil.style.cssText = 'position:fixed;inset:0;z-index:2147483600;background:rgba(11,20,26,.5);opacity:0;transition:opacity 180ms ease;pointer-events:none;';
 				(document.body || document.documentElement).appendChild(veil);
 				requestAnimationFrame(function() { veil.style.opacity = '1'; });
 			}
@@ -2935,6 +2944,10 @@ func getInitScript(ua string) string {
 				switchingId = account.id;
 				renderDock(window.__waAccountRailAccounts || []);
 				showSwitchVeil();
+				// Freeze background work on the outgoing page while it is parked:
+				// two WhatsApp pages briefly alive would otherwise double the
+				// renderer load right when the fresh account starts painting.
+				waBackgroundWorkBusyUntil = Date.now() + 5000;
 				callBridge('requestAccountSwitchNative', [account.id, String(window.__waDockLastBadge || '')]).then(function() {
 					// Native switching may terminate and relaunch the whole process. If it
 					// does not, refresh the active marker before unlocking the dock.
