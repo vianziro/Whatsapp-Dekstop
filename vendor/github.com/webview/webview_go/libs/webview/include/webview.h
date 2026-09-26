@@ -2128,13 +2128,21 @@ private:
                       raw.substr(20, 12);
         }
       }
-      auto identifier = objc::autoreleased(objc::msg_send<id>(
-          "NSString"_cls, "stringWithUTF8String:"_sel, canonical.c_str()));
-      auto uuid = identifier
-                      ? objc::autoreleased(objc::msg_send<id>(
-                            objc::msg_send<id>("NSUUID"_cls, "alloc"_sel),
-                            "initWithUUIDString:"_sel, identifier))
-                      : nil;
+      // NOTE: stringWithUTF8String already returns an autoreleased object.
+      // Wrapping it in objc::autoreleased would autorelease it a second time,
+      // and the pool would then over-release it at drain — a crash that only
+      // shows up when a non-default account profile is active at startup.
+      auto identifier = canonical.empty()
+                            ? nil
+                            : objc::msg_send<id>(
+                                  "NSString"_cls, "stringWithUTF8String:"_sel,
+                                  canonical.c_str());
+      auto uuid =
+          identifier
+              ? objc::autoreleased(objc::msg_send<id>(
+                    objc::msg_send<id>("NSUUID"_cls, "alloc"_sel),
+                    "initWithUUIDString:"_sel, identifier))
+              : nil;
       uuid_parsed = uuid != nil;
 
       // dataStoreForIdentifier: (macOS 14+/iOS 17+) gives a genuinely
