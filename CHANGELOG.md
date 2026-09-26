@@ -29,6 +29,21 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
   the page rail switches, creates, and renames profiles, with
   `Ctrl/Cmd+Shift+1/2` as shortcuts. On macOS and Linux the switch swaps the
   browser view in place; on Windows it restarts the window.
+- Unread hint per account chip: the dock shows the badge value an account had
+  when it was last switched away from. Recorded once per switch, never polled.
+
+### Fixed
+
+- macOS 13 (and older): the second account now keeps its session across app
+  restarts. The named per-account data store API is macOS 14+ only, so the
+  fallback built an in-memory store before; it now builds the same persistent
+  store through WebKit's `_WKWebsiteDataStoreConfiguration`. Account IDs from
+  older registries (UUIDs without dashes) are canonicalized before parsing,
+  which previously failed silently and downgraded every account to an
+  in-memory store.
+- Account switching no longer blanks the window. The replacement view is
+  built before anything is touched on screen, the outgoing page stays visible
+  (with a soft veil and clicks disabled) until the incoming account paints.
 
 ## [1.5.9.9] - 2026-09-26
 

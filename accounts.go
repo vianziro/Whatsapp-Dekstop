@@ -21,6 +21,11 @@ type Account struct {
 	ID        string    `json:"id"`
 	Label     string    `json:"label"`
 	CreatedAt time.Time `json:"created_at"`
+	// LastUnread is the badge value (e.g. "3", "999+") the account showed in
+	// its title the last time it was switched away from. Only one engine is
+	// live at a time, so this is a hint snapshot written at switch time — no
+	// background polling, no timers. Empty means "no unread when last seen".
+	LastUnread string `json:"last_unread,omitempty"`
 }
 
 type AccountRegistry struct {
@@ -227,9 +232,10 @@ func accountsForUI() ([]map[string]any, error) {
 	accounts := make([]map[string]any, 0, len(registry.Accounts))
 	for _, account := range registry.Accounts {
 		accounts = append(accounts, map[string]any{
-			"id":     account.ID,
-			"label":  account.Label,
-			"active": account.ID == registry.ActiveAccountID,
+			"id":          account.ID,
+			"label":       account.Label,
+			"active":      account.ID == registry.ActiveAccountID,
+			"last_unread": account.LastUnread,
 		})
 	}
 	return accounts, nil
@@ -289,4 +295,46 @@ func setActiveAccount(id string) error {
 	}
 	registry.ActiveAccountID = id
 	return saveAccountRegistryLocked(registry)
+}
+
+// sanitizeLastUnread keeps the badge hint tiny and harmless: only digits and
+// a plus sign, at most 6 characters, and "0" collapses to empty. The value
+// originates in the page's <title>, so it is never trusted verbatim.
+func sanitizeLastUnread(value string) string {
+	var kept []rune
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || r == '+' {
+			kept = append(kept, r)
+			if len(kept) == 6 {
+				break
+			}
+		}
+	}
+	cleaned := string(kept)
+	if cleaned == "0" || cleaned == "+0" {
+		return ""
+	}
+	return cleaned
+}
+
+// setLastUnreadForActiveAccount records the outgoing account's badge hint at
+// switch time. Called from the switch bridge only; no recurring writes.
+func setLastUnreadForActiveAccount(value string) error {
+	value = sanitizeLastUnread(value)
+	accountRegistryMu.Lock()
+	defer accountRegistryMu.Unlock()
+	registry, err := loadAccountRegistryLocked()
+	if err != nil {
+		return err
+	}
+	for i := range registry.Accounts {
+		if registry.Accounts[i].ID == registry.ActiveAccountID {
+			if registry.Accounts[i].LastUnread == value {
+				return nil
+			}
+			registry.Accounts[i].LastUnread = value
+			return saveAccountRegistryLocked(registry)
+		}
+	}
+	return errors.New("account does not exist")
 }

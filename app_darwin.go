@@ -1453,8 +1453,14 @@ func runApp() {
 			}
 			return map[string]any{"id": account.ID, "label": account.Label}
 		})
-		_ = w.Bind("requestAccountSwitchNative", func(id string) bool {
-			if switchRequested || isActiveAccount(id) || setActiveAccount(id) != nil {
+		_ = w.Bind("requestAccountSwitchNative", func(id, lastUnread string) bool {
+			if switchRequested || isActiveAccount(id) {
+				return false
+			}
+			// Snapshot the outgoing account's unread badge before flipping the
+			// registry, so the dock can hint "unread when last seen" on the chip.
+			_ = setLastUnreadForActiveAccount(lastUnread)
+			if setActiveAccount(id) != nil {
 				return false
 			}
 			// Serialized: a second request arriving while a swap is in flight is

@@ -1552,6 +1552,10 @@ func getInitScript(ua string) string {
 				var badge = match ? match[1] : '';
 				if (badge !== lastBadge) {
 					lastBadge = badge;
+					// Read by the account dock when a switch starts: the outgoing
+					// account's unread snapshot is recorded natively at that exact
+					// moment, so the chip hint never needs background polling.
+					window.__waDockLastBadge = badge;
 					if (window.updateDockBadge) {
 						window.updateDockBadge(badge);
 					}
@@ -2776,7 +2780,8 @@ func getInitScript(ua string) string {
 					return {
 						id: account.id != null ? account.id : (account.accountId != null ? account.accountId : String(index)),
 						label: accountLabel(account, index),
-						active: !!(account.active || account.isActive || account.current)
+						active: !!(account.active || account.isActive || account.current),
+						unread: String(account.lastUnread || account.last_unread || '')
 					};
 				});
 			}
@@ -2902,6 +2907,26 @@ func getInitScript(ua string) string {
 				});
 			}
 
+			function showSwitchVeil() {
+				// A gentle full-window veil on the outgoing page. While the native
+				// swap parks this page on top for a beat, the veil reads as an
+				// intentional transition instead of a frozen page. Pure CSS, no
+				// timers; it dies with this page when the new engine takes over.
+				var existing = document.getElementById('wa-switch-veil');
+				if (existing) return;
+				var veil = document.createElement('div');
+				veil.id = 'wa-switch-veil';
+				veil.setAttribute('aria-hidden', 'true');
+				veil.style.cssText = 'position:fixed;inset:0;z-index:2147483600;background:rgba(11,20,26,.5);backdrop-filter:saturate(80%);opacity:0;transition:opacity 180ms ease;pointer-events:none;';
+				(document.body || document.documentElement).appendChild(veil);
+				requestAnimationFrame(function() { veil.style.opacity = '1'; });
+			}
+
+			function hideSwitchVeil() {
+				var veil = document.getElementById('wa-switch-veil');
+				if (veil && veil.parentNode) veil.parentNode.removeChild(veil);
+			}
+
 			function requestSwitch(account) {
 				if (switchingId !== null || !hasBridge('requestAccountSwitchNative')) {
 					if (!hasBridge('requestAccountSwitchNative')) showBridgeUnavailable();
@@ -2909,11 +2934,13 @@ func getInitScript(ua string) string {
 				}
 				switchingId = account.id;
 				renderDock(window.__waAccountRailAccounts || []);
-				callBridge('requestAccountSwitchNative', [account.id]).then(function() {
+				showSwitchVeil();
+				callBridge('requestAccountSwitchNative', [account.id, String(window.__waDockLastBadge || '')]).then(function() {
 					// Native switching may terminate and relaunch the whole process. If it
 					// does not, refresh the active marker before unlocking the dock.
 					return loadAccounts();
 				}).catch(function() {
+					hideSwitchVeil();
 					if (window.showFloatingToast) window.showFloatingToast('Unable to switch account.');
 				}).then(function() {
 					switchingId = null;
@@ -2987,6 +3014,16 @@ func getInitScript(ua string) string {
 					button.style.cssText = 'position:relative;width:38px;height:38px;padding:0;border-radius:50%;border:2px solid ' + (account.active ? '#00a884' : 'transparent') + ';background:' + (account.active ? '#005c4b' : '#2a3942') + ';color:#e9edef;font-size:12px;font-weight:700;letter-spacing:.2px;cursor:' + (switchingId !== null ? 'wait' : 'pointer') + ';outline:none;transition:transform .15s ease,background-color .15s ease,border-color .15s ease;';
 					button.textContent = isSwitching ? '…' : accountInitials(account.label);
 					if (isSwitching) button.setAttribute('aria-busy', 'true');
+					// Unread hint: a snapshot recorded when this account was last
+					// switched away from. Only shown on inactive chips; the active
+					// account's live badge is WhatsApp's own title badge.
+					if (!account.active && account.unread && !isSwitching) {
+						var dot = document.createElement('span');
+						dot.style.cssText = 'position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;padding:0 4px;box-sizing:border-box;border-radius:9px;background:#25d366;color:#111b21;font-size:10px;font-weight:700;line-height:18px;text-align:center;';
+						dot.textContent = account.unread;
+						button.appendChild(dot);
+						button.title = account.label + '\n' + account.unread + ' unread when last active';
+					}
 					button.onclick = function() { requestSwitch(account); };
 					button.ondblclick = function(e) { e.preventDefault(); renameAccount(account); };
 					button.onmouseenter = function() { if (!button.disabled) button.style.transform = 'scale(1.06)'; };

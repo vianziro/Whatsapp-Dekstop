@@ -1785,7 +1785,7 @@ public:
     };
     auto *leftover = new leftover_view{previous_view};
     dispatch_after_f(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
         dispatch_get_main_queue(), leftover,
         [](void *arg) {
           auto *lv = static_cast<leftover_view *>(arg);
@@ -2101,21 +2101,48 @@ private:
           "dataStoreForIdentifier:"_sel);
       bool uuid_parsed = false;
 
+      // The registry stores account IDs as 32 hex chars WITHOUT dashes,
+      // but NSUUID only accepts the canonical dashed form — an undashed
+      // string makes initWithUUIDString: return nil and silently downgrades
+      // every account to the ephemeral store. Accept both forms here.
+      std::string canonical;
+      {
+        std::string raw(profile_identifier);
+        bool dashed = raw.size() == 36 && raw[8] == '-' && raw[13] == '-' &&
+                      raw[18] == '-' && raw[23] == '-';
+        bool undashed = raw.size() == 32;
+        bool hex_only = true;
+        for (char c : raw) {
+          bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                     (c >= 'A' && c <= 'F');
+          if (!(hex || c == '-')) {
+            hex_only = false;
+            break;
+          }
+        }
+        if (dashed && hex_only) {
+          canonical = raw;
+        } else if (undashed && hex_only) {
+          canonical = raw.substr(0, 8) + "-" + raw.substr(8, 4) + "-" +
+                      raw.substr(12, 4) + "-" + raw.substr(16, 4) + "-" +
+                      raw.substr(20, 12);
+        }
+      }
+      auto identifier = objc::autoreleased(objc::msg_send<id>(
+          "NSString"_cls, "stringWithUTF8String:"_sel, canonical.c_str()));
+      auto uuid = identifier
+                      ? objc::autoreleased(objc::msg_send<id>(
+                            objc::msg_send<id>("NSUUID"_cls, "alloc"_sel),
+                            "initWithUUIDString:"_sel, identifier))
+                      : nil;
+      uuid_parsed = uuid != nil;
+
       // dataStoreForIdentifier: (macOS 14+/iOS 17+) gives a genuinely
       // separate PERSISTENT store per UUID, so a second account's WhatsApp
       // pairing survives an app restart just like the first account's does.
-      if (named_api_available) {
-        auto uuid = objc::autoreleased(
-            objc::msg_send<id>("NSUUID"_cls, "alloc"_sel));
-        auto identifier = objc::msg_send<id>("NSString"_cls,
-                                             "stringWithUTF8String:"_sel,
-                                             profile_identifier);
-        uuid = objc::msg_send<id>(uuid, "initWithUUIDString:"_sel, identifier);
-        uuid_parsed = uuid != nil;
-        if (uuid) {
-          store = objc::msg_send<id>("WKWebsiteDataStore"_cls,
-                                     "dataStoreForIdentifier:"_sel, uuid);
-        }
+      if (uuid && named_api_available) {
+        store = objc::msg_send<id>("WKWebsiteDataStore"_cls,
+                                   "dataStoreForIdentifier:"_sel, uuid);
       }
 
       // Older macOS/iOS (or a malformed identifier) has no named-persistent
@@ -2128,19 +2155,12 @@ private:
       // keeps its contents across relaunches). Without it the second account
       // would lose its pairing on every quit.
       bool used_ephemeral = false;
-      if (!store) {
+      if (!store && uuid) {
         id spi_cfg = objc::msg_send<id>(
             objc_getClass("_WKWebsiteDataStoreConfiguration"), "alloc"_sel);
         if (spi_cfg) {
-          auto spi_uuid = objc::autoreleased(objc::msg_send<id>(
-              objc::msg_send<id>("NSUUID"_cls, "alloc"_sel),
-              "initWithUUIDString:"_sel,
-              objc::msg_send<id>("NSString"_cls, "stringWithUTF8String:"_sel,
-                                 profile_identifier)));
-          spi_cfg = spi_uuid ? objc::msg_send<id>(
-                                   spi_cfg, "initWithIdentifier:"_sel,
-                                   spi_uuid)
-                             : nullptr;
+          spi_cfg = objc::msg_send<id>(spi_cfg, "initWithIdentifier:"_sel,
+                                       uuid);
         }
         if (spi_cfg) {
           id spi_store = objc::msg_send<id>(
@@ -2158,6 +2178,10 @@ private:
                                      "nonPersistentDataStore"_sel);
           used_ephemeral = true;
         }
+      } else if (!store) {
+        store = objc::msg_send<id>("WKWebsiteDataStore"_cls,
+                                   "nonPersistentDataStore"_sel);
+        used_ephemeral = true;
       }
 
       if (store) {
@@ -2166,10 +2190,10 @@ private:
 
       if (profile_debug) {
         fprintf(stderr,
-                "[wa-desk-profile] id=%s named_api=%d uuid_parsed=%d "
-                "ephemeral=%d store_set=%d\n",
-                profile_identifier, named_api_available, uuid_parsed,
-                used_ephemeral, store != nil);
+                "[wa-desk-profile] id=%s canonical=%s named_api=%d "
+                "uuid_parsed=%d ephemeral=%d store_set=%d\n",
+                profile_identifier, canonical.c_str(), named_api_available,
+                uuid_parsed, used_ephemeral, store != nil);
       }
     } else if (profile_debug) {
       fprintf(stderr, "[wa-desk-profile] using shared default datastore "

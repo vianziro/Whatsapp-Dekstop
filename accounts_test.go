@@ -48,6 +48,62 @@ func TestAccountRegistryAllowsAtMostTwoAccounts(t *testing.T) {
 	}
 }
 
+func TestSanitizeLastUnread(t *testing.T) {
+	cases := map[string]string{
+		"3":        "3",
+		"999+":     "999+",
+		"(12)":     "12",
+		"":         "",
+		"0":        "",
+		"hack;<i>": "",
+		"12345678": "123456",
+		"7\n":      "7",
+	}
+	for input, want := range cases {
+		if got := sanitizeLastUnread(input); got != want {
+			t.Errorf("sanitizeLastUnread(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSetLastUnreadForActiveAccountRoundTrip(t *testing.T) {
+	withAccountRegistryFile(t)
+	if _, err := loadAccountRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	work, err := createAccount("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setActiveAccount(work.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := setLastUnreadForActiveAccount("5"); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := accountsForUI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]map[string]any{}
+	for _, a := range accounts {
+		byID[a["id"].(string)] = a
+	}
+	if got := byID[work.ID]["last_unread"]; got != "5" {
+		t.Fatalf("active account hint = %v, want 5", got)
+	}
+	// "0" collapses to empty: an unread-free account must not show a hint.
+	if err := setLastUnreadForActiveAccount("0"); err != nil {
+		t.Fatal(err)
+	}
+	accounts, _ = accountsForUI()
+	for _, a := range accounts {
+		if a["id"].(string) == work.ID && a["last_unread"] != "" {
+			t.Fatalf("hint should collapse to empty, got %v", a["last_unread"])
+		}
+	}
+}
+
 func TestActiveAccountDataPathAdoptsLegacyProfileByReference(t *testing.T) {
 	withAccountRegistryFile(t)
 
