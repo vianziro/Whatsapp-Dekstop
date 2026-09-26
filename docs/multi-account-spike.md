@@ -4,7 +4,35 @@
 > gitignores. Committed here so the product decisions behind the
 > multi-account branch stay alongside the code they describe.
 >
-> Status: **spike, macOS only.** The five merge gates below are not yet met.
+> Status: **implemented on all three platforms (branch `feat/multi-account`).**
+> macOS switches in place; Windows and Linux rebuild the engine on switch, with
+> Linux also offering the in-place browser swap when the native extension is
+> available. The five merge gates below are not yet met — manual validation on
+> real accounts is still outstanding.
+
+## Implementation status (2026-09-26)
+
+- **macOS** — `WKWebsiteDataStore(forIdentifier:)` per UUID, selected before the
+  `WKWebView` is created via the `WA_DESK_PROFILE_UUID` environment variable.
+  Switching rebuilds only the browser view (`webview_recreate_browser_active()`)
+  so the window, menu bar and tray survive; the teardown-rebuild loop is the
+  fallback.
+- **Windows** — one WebView2 user-data folder per account
+  (`WA_DESK_PROFILE_DIR` is not used here; the Go side selects
+  `activeAccountDataPath()` before the controller is created). The engine and
+  its window are rebuilt per session (`runApp` loop); the research doc accepts
+  this for the one-live-engine model because WebView2 named profiles would
+  require forking the controller creation path.
+- **Linux** — `WebKitWebsiteDataManager` + `WebKitWebContext` per profile
+  directory, chosen from `WA_DESK_PROFILE_DIR` while the browser widget is
+  created (`gtk_webkit_engine::set_up_web_view`). Switching prefers the same
+  in-place widget swap as macOS (`recreate_browser_impl` for the GTK backend);
+  the session rebuild loop is the fallback.
+- **Shared** — `accounts.go` registry (max two accounts, opaque UUIDs, migration
+  by reference for the first account), the account dock UI with
+  `Ctrl/Cmd+Shift+1/2` shortcuts, and identical bridge semantics
+  (`getAccountsNative`, `createAccountNative`, `renameAccountNative`,
+  `requestAccountSwitchNative`) on every platform.
 
 ## Purpose
 

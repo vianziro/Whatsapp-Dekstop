@@ -847,11 +847,14 @@ func TestWindowsMemoryReleaseDoesNotOrphanSuspendedWebView(t *testing.T) {
 	if start < 0 {
 		t.Fatal("Windows memory release binding not found")
 	}
-	end := strings.Index(content[start:], "\n\t})")
-	if end < 0 {
+	// The binding body ends where the next binding starts. The source sits
+	// inside the multi-account session loop, so leading indentation varies and
+	// the end marker must not be tied to a specific number of tabs.
+	next := strings.Index(content[start+1:], "_ = w.Bind(")
+	if next < 0 {
 		t.Fatal("Windows memory release binding is incomplete")
 	}
-	binding := content[start : start+end]
+	binding := content[start : start+1+next]
 	for _, line := range strings.Split(binding, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "//") && strings.Contains(line, "w.Suspend()") {

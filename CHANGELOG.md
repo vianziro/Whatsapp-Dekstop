@@ -19,6 +19,17 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ## [Unreleased]
 
+### Added
+
+- Account profiles: link a second WhatsApp account alongside the existing one.
+  Each account keeps an isolated browser profile (WKWebsiteDataStore on macOS,
+  a WebView2 user-data folder on Windows, a WebKitGTK website-data manager on
+  Linux); the first account adopts the existing session by reference, so no
+  re-pairing is needed. One engine is live at a time, and the account dock in
+  the page rail switches, creates, and renames profiles, with
+  `Ctrl/Cmd+Shift+1/2` as shortcuts. On macOS and Linux the switch swaps the
+  browser view in place; on Windows it restarts the window.
+
 ## [1.5.9.9] - 2026-09-26
 
 > Privacy Reliability, Linux Self-Update & Update Banner Fixes

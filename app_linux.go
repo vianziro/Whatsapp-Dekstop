@@ -9,6 +9,11 @@ package main
 #include <stdlib.h>
 #include <string.h>
 
+// WhatsApp Desk local extension (see webview.h): rebuilds only the browser
+// widget of the live engine so an account switch can hand the same window to
+// a different profile's website-data store.
+extern int webview_recreate_browser_active(void);
+
 static gboolean whatsappDeskInitialDark = FALSE;
 static gboolean whatsappDeskThemeCaptured = FALSE;
 
@@ -750,259 +755,387 @@ func runApp() {
 		}
 	}
 
-	w := webview.New(false)
-	if w == nil {
-		log.Fatalln("Gagal inisialisasi WebKitGTK Webview")
-	}
-	defer w.Destroy()
-	applyNativeThemeLinux(loadSettings().Theme)
-
-	w.SetTitle(windowTitle)
-	w.SetSize(initialWidth, initialHeight, webview.HintNone)
-
-	// Bind window state saver from JS resize events. The window handle is
-	// passed through so X11 frames can be stored per monitor.
-	_ = w.Bind("saveWindowStateNative", func(width, height int) {
-		saveWindowState(userDataDir, w.Window(), width, height)
-	})
-
-	iconPath := ensureAppIconFileLinux(userDataDir)
-
-	// Initialize system tray
-	initSystemTrayLinux(iconPath)
-	defer shutdownSystemTrayLinux()
-
-	// Bind native notification bridge
-	_ = w.Bind("sendNativeNotification", func(title, body string) {
-		go showNativeNotification(title, body, iconPath)
-	})
-	_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
-	_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
-
-	_ = w.Bind("releaseMemoryNative", func() {
-		debug.FreeOSMemory()
-		debugLogProcessStats("release-memory")
-		enforceDiskCacheCapFrom(linuxCacheHomes, linuxPurgeTargets, "minimize")
-	})
-
-	// Bind external link handler (xdg-open)
-	_ = w.Bind("openExternalLink", func(rawURL string) {
-		if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
-			go func() {
-				_ = exec.Command("xdg-open", rawURL).Start()
-			}()
+	// Multi-account: one WebKitGTK website-data store per account with only
+	// one live engine at a time. The first account deliberately keeps the
+	// historic default context (env unset), so the existing pairing is adopted
+	// by reference and never moved; every other account gets an isolated
+	// profile directory.
+	switchRequested := false
+	switchMu := make(chan struct{}, 1)
+	for !switchRequested {
+		if err := applyActiveAccountProfileDir(); err != nil {
+			log.Printf("unable to select account profile: %v", err)
 		}
-	})
 
-	// Bind dock badge -> StatusNotifierItem overlay icon (unread count)
-	_ = w.Bind("updateDockBadge", func(badge string) {
-		count := 0
-		if strings.TrimSpace(badge) != "" {
-			fmt.Sscanf(strings.TrimSpace(badge), "%d", &count)
-			if count == 0 {
-				count = 1 // non-numeric badge (e.g. "•") still means unread
+		w := webview.New(false)
+		if w == nil {
+			log.Fatalln("Gagal inisialisasi WebKitGTK Webview")
+		}
+		applyNativeThemeLinux(loadSettings().Theme)
+
+		w.SetTitle(windowTitle)
+		w.SetSize(initialWidth, initialHeight, webview.HintNone)
+
+		// Bind window state saver from JS resize events. The window handle is
+		// passed through so X11 frames can be stored per monitor.
+		_ = w.Bind("saveWindowStateNative", func(width, height int) {
+			saveWindowState(userDataDir, w.Window(), width, height)
+		})
+
+		iconPath := ensureAppIconFileLinux(userDataDir)
+
+		// Initialize system tray
+		initSystemTrayLinux(iconPath)
+		defer shutdownSystemTrayLinux()
+
+		// Bind native notification bridge
+		_ = w.Bind("sendNativeNotification", func(title, body string) {
+			go showNativeNotification(title, body, iconPath)
+		})
+		_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
+		_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
+
+		_ = w.Bind("releaseMemoryNative", func() {
+			debug.FreeOSMemory()
+			debugLogProcessStats("release-memory")
+			enforceDiskCacheCapFrom(linuxCacheHomes, linuxPurgeTargets, "minimize")
+		})
+
+		// Bind external link handler (xdg-open)
+		_ = w.Bind("openExternalLink", func(rawURL string) {
+			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+				go func() {
+					_ = exec.Command("xdg-open", rawURL).Start()
+				}()
 			}
-		}
-		C.tray_update_overlay_icon_go(C.int(count))
-	})
+		})
 
-	// Bind Always on Top toggle
-	_ = w.Bind("toggleAlwaysOnTopNative", func() bool {
-		return toggleAlwaysOnTopLinux()
-	})
+		// Bind dock badge -> StatusNotifierItem overlay icon (unread count)
+		_ = w.Bind("updateDockBadge", func(badge string) {
+			count := 0
+			if strings.TrimSpace(badge) != "" {
+				fmt.Sscanf(strings.TrimSpace(badge), "%d", &count)
+				if count == 0 {
+					count = 1 // non-numeric badge (e.g. "•") still means unread
+				}
+			}
+			C.tray_update_overlay_icon_go(C.int(count))
+		})
 
-	// Bind Auto-Start toggle
-	_ = w.Bind("toggleAutoStartNative", func() bool {
-		return toggleAutoStartLinux()
-	})
+		// Bind Always on Top toggle
+		_ = w.Bind("toggleAlwaysOnTopNative", func() bool {
+			return toggleAlwaysOnTopLinux()
+		})
 
-	// Bind in-app auto updater
-	_ = w.Bind("checkForUpdateNative", func(manual bool) UpdateInfo {
-		info, err := checkForUpdate(appVersion)
-		if err != nil {
-			return UpdateInfo{CurrentVersion: appVersion, CheckError: err.Error()}
-		}
-		return *info
-	})
+		// Bind Auto-Start toggle
+		_ = w.Bind("toggleAutoStartNative", func() bool {
+			return toggleAutoStartLinux()
+		})
 
-	_ = w.Bind("startUpdateNative", func(downloadURL string) {
-		go func() {
-			_ = executeUpdate(w, downloadURL)
-		}()
-	})
-
-	// Bind download, preview, and settings handlers
-	_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
-		path, err := saveDownloadedFile(filename, dataURI)
-		if err != nil {
-			return ""
-		}
-		return path
-	})
-
-	_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
-		path, err := previewDocument(filename, dataURI)
-		if err != nil {
-			return ""
-		}
-		return path
-	})
-
-	_ = w.Bind("openFileNative", func(filePath string) bool {
-		return openFileInDefaultApp(filePath)
-	})
-
-	// Lazy-load SheetJS library for spreadsheet preview
-	_ = w.Bind("loadXLSXLibraryNative", func() string {
-		return xlsxLibJS
-	})
-
-	_ = w.Bind("getDownloadDirNative", func() string {
-		s := loadSettings()
-		return s.DownloadDir
-	})
-
-	_ = w.Bind("getOrganizeByMonthNative", func() bool {
-		return loadSettings().OrganizeByMonth
-	})
-
-	_ = w.Bind("setOrganizeByMonthNative", func(on bool) bool {
-		return setOrganizeByMonth(on)
-	})
-
-	_ = w.Bind("checkFileExistsNative", func(filename string) bool {
-		return fileExistsInDownloadDir(filename)
-	})
-
-	_ = w.Bind("chooseDownloadDirNative", func() string {
-		selected, err := chooseFolderDialog()
-		if err != nil || selected == "" {
-			return ""
-		}
-		// Fast-fail here (the shared saver and loadSettings re-validate
-		// anyway) so the UI never reports a sensitive folder as applied.
-		if err := validateDownloadDir(selected); err != nil {
-			return ""
-		}
-		s := loadSettings()
-		s.DownloadDir = selected
-		_ = saveSettings(s)
-		return selected
-	})
-
-	_ = w.Bind("openDownloadDirNative", func() bool {
-		s := loadSettings()
-		_ = openFolderInFileManager(s.DownloadDir)
-		return true
-	})
-
-	_ = w.Bind("resetDownloadDirNative", func() string {
-		s := loadSettings()
-		s.DownloadDir = getDefaultDownloadDir()
-		_ = saveSettings(s)
-		return s.DownloadDir
-	})
-
-	_ = w.Bind("getAppThemeNative", func() string {
-		s := loadSettings()
-		return s.Theme
-	})
-
-	_ = w.Bind("setAppThemeNative", func(theme string) string {
-		saved := saveTheme(theme)
-		applyNativeThemeLinux(saved)
-		return saved
-	})
-
-	// Spell check bindings
-	_ = w.Bind("getSpellCheckEnabledNative", func() bool {
-		return getSpellCheckEnabled()
-	})
-	_ = w.Bind("setSpellCheckEnabledNative", func(enabled bool) bool {
-		return setSpellCheckEnabled(enabled)
-	})
-	_ = w.Bind("getSpellCheckLangNative", func() string {
-		return getSpellCheckLang()
-	})
-	_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
-		return setSpellCheckLang(lang)
-	})
-	_ = w.Bind("getBlurAvatarsNative", func() bool {
-		return getBlurAvatars()
-	})
-	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
-		return setBlurAvatars(on)
-	})
-	_ = w.Bind("getPendingCrashNative", func() string {
-		return pendingCrashReport()
-	})
-	_ = w.Bind("markCrashNotifiedNative", func() bool {
-		return markCrashNotified()
-	})
-
-	w.Init(getInitScript(userAgentLinux))
-	w.Navigate(appURL)
-
-	// Check for updates in the background after startup & periodically
-	go guardGoroutine("update-ticker", func() {
-		checkAndNotifyUpdate := func() {
+		// Bind in-app auto updater
+		_ = w.Bind("checkForUpdateNative", func(manual bool) UpdateInfo {
 			info, err := checkForUpdate(appVersion)
-			if err == nil && info != nil && info.Available {
-				w.Dispatch(func() {
-					script := fmt.Sprintf("if (window.showUpdateBanner) { window.showUpdateBanner(%q, %q, %q); }",
-						info.LatestVersion, info.ReleaseTitle, info.DownloadURL)
-					w.Eval(script)
-				})
+			if err != nil {
+				return UpdateInfo{CurrentVersion: appVersion, CheckError: err.Error()}
 			}
-		}
+			return *info
+		})
 
-		time.Sleep(5 * time.Second)
-		checkAndNotifyUpdate()
+		_ = w.Bind("startUpdateNative", func(downloadURL string) {
+			go func() {
+				_ = executeUpdate(w, downloadURL)
+			}()
+		})
 
-		ticker := time.NewTicker(4 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			checkAndNotifyUpdate()
-		}
-	})
-
-	// Second pass: once the window is realized the compositor has placed it on
-	// a monitor, so the frame saved for that specific display can be applied.
-	// Runs on the UI thread via Dispatch; a short delay avoids fighting the
-	// window manager's own initial placement.
-	go guardGoroutine("restore-monitor-frame", func() {
-		time.Sleep(900 * time.Millisecond)
-		w.Dispatch(func() {
-			win := w.Window()
-			if win == nil {
-				return
+		// Bind download, preview, and settings handlers
+		_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
+			path, err := saveDownloadedFile(filename, dataURI)
+			if err != nil {
+				return ""
 			}
-			monitorKey := C.GoString(C.windowMonitorName(win))
-			state := loadWindowStateForMonitor(userDataDir, monitorKey)
-			if state == nil {
-				return
+			return path
+		})
+
+		_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
+			path, err := previewDocument(filename, dataURI)
+			if err != nil {
+				return ""
 			}
-			// Wayland exposes no absolute position: keep whatever placement
-			// the compositor chose and only honor a saved size. gtk_window_move
-			// is a no-op there, so the resize-only helper is used to avoid
-			// passing coordinates the compositor never reported.
-			var x, y, curW, curH C.int
-			hasPosition := C.getWindowFrameLinux(win, &x, &y, &curW, &curH) != 0
-			if !hasPosition {
-				if int(curW) == int(state.Width) && int(curH) == int(state.Height) {
+			return path
+		})
+
+		_ = w.Bind("openFileNative", func(filePath string) bool {
+			return openFileInDefaultApp(filePath)
+		})
+
+		// Lazy-load SheetJS library for spreadsheet preview
+		_ = w.Bind("loadXLSXLibraryNative", func() string {
+			return xlsxLibJS
+		})
+
+		_ = w.Bind("getDownloadDirNative", func() string {
+			s := loadSettings()
+			return s.DownloadDir
+		})
+
+		_ = w.Bind("getOrganizeByMonthNative", func() bool {
+			return loadSettings().OrganizeByMonth
+		})
+
+		_ = w.Bind("setOrganizeByMonthNative", func(on bool) bool {
+			return setOrganizeByMonth(on)
+		})
+
+		_ = w.Bind("checkFileExistsNative", func(filename string) bool {
+			return fileExistsInDownloadDir(filename)
+		})
+
+		_ = w.Bind("chooseDownloadDirNative", func() string {
+			selected, err := chooseFolderDialog()
+			if err != nil || selected == "" {
+				return ""
+			}
+			// Fast-fail here (the shared saver and loadSettings re-validate
+			// anyway) so the UI never reports a sensitive folder as applied.
+			if err := validateDownloadDir(selected); err != nil {
+				return ""
+			}
+			s := loadSettings()
+			s.DownloadDir = selected
+			_ = saveSettings(s)
+			return selected
+		})
+
+		_ = w.Bind("openDownloadDirNative", func() bool {
+			s := loadSettings()
+			_ = openFolderInFileManager(s.DownloadDir)
+			return true
+		})
+
+		_ = w.Bind("resetDownloadDirNative", func() string {
+			s := loadSettings()
+			s.DownloadDir = getDefaultDownloadDir()
+			_ = saveSettings(s)
+			return s.DownloadDir
+		})
+
+		_ = w.Bind("getAppThemeNative", func() string {
+			s := loadSettings()
+			return s.Theme
+		})
+
+		_ = w.Bind("setAppThemeNative", func(theme string) string {
+			saved := saveTheme(theme)
+			applyNativeThemeLinux(saved)
+			return saved
+		})
+
+		// Spell check bindings
+		_ = w.Bind("getSpellCheckEnabledNative", func() bool {
+			return getSpellCheckEnabled()
+		})
+		_ = w.Bind("setSpellCheckEnabledNative", func(enabled bool) bool {
+			return setSpellCheckEnabled(enabled)
+		})
+		_ = w.Bind("getSpellCheckLangNative", func() string {
+			return getSpellCheckLang()
+		})
+		_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
+			return setSpellCheckLang(lang)
+		})
+		_ = w.Bind("getBlurAvatarsNative", func() bool {
+			return getBlurAvatars()
+		})
+		_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
+			return setBlurAvatars(on)
+		})
+		_ = w.Bind("getPendingCrashNative", func() string {
+			return pendingCrashReport()
+		})
+		_ = w.Bind("markCrashNotifiedNative", func() bool {
+			return markCrashNotified()
+		})
+
+		// Account bridge: display-only metadata over the wire, never a profile
+		// path. A switch first tries the in-place browser swap; only when the
+		// native swap is unavailable does this end the session so the loop in
+		// runApp rebuilds the engine on the account that is now active.
+		_ = w.Bind("getAccountsNative", func() []map[string]any {
+			accounts, err := accountsForUI()
+			if err != nil {
+				return []map[string]any{}
+			}
+			return accounts
+		})
+		_ = w.Bind("createAccountNative", func(label string) map[string]any {
+			account, err := createAccount(label)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("renameAccountNative", func(id, label string) map[string]any {
+			account, err := renameAccount(id, label)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("requestAccountSwitchNative", func(id string) bool {
+			if switchRequested || isActiveAccount(id) || setActiveAccount(id) != nil {
+				return false
+			}
+			// Serialized: a second request arriving while a swap is in flight is
+			// dropped rather than racing the one already queued.
+			select {
+			case switchMu <- struct{}{}:
+			default:
+				return false
+			}
+			// Deferred to the next main-loop turn instead of running inline: this
+			// callback is still executing inside the very WebView that is about to
+			// be replaced or destroyed.
+			w.Dispatch(func() {
+				defer func() { <-switchMu }()
+				if swapBrowserToActiveAccountLinux(w) {
 					return
 				}
-				C.resizeWindowTo(win, C.int(state.Width), C.int(state.Height))
-				return
-			}
-			if int(x) == int(state.X) && int(y) == int(state.Y) &&
-				int(curW) == int(state.Width) && int(curH) == int(state.Height) {
-				return // already where it belongs
-			}
-			C.moveWindowTo(win, C.int(state.X), C.int(state.Y), C.int(state.Width), C.int(state.Height))
+				switchRequested = true
+				w.Terminate()
+			})
+			return true
 		})
-	})
 
-	defer saveWindowState(userDataDir, w.Window(), initialWidth, initialHeight)
-	w.Run()
+		w.Init(getInitScript(userAgentLinux))
+		w.Navigate(appURL)
+
+		// Check for updates in the background after startup & periodically. The
+		// ticker is stopped before this session's engine is destroyed so it never
+		// Dispatches into a dead WebView after an account switch.
+		stopUpdateTicker := make(chan struct{})
+		go guardGoroutine("update-ticker", func() {
+			checkAndNotifyUpdate := func() {
+				info, err := checkForUpdate(appVersion)
+				if err == nil && info != nil && info.Available {
+					w.Dispatch(func() {
+						script := fmt.Sprintf("if (window.showUpdateBanner) { window.showUpdateBanner(%q, %q, %q); }",
+							info.LatestVersion, info.ReleaseTitle, info.DownloadURL)
+						w.Eval(script)
+					})
+				}
+			}
+
+			select {
+			case <-stopUpdateTicker:
+				return
+			case <-time.After(5 * time.Second):
+			}
+			checkAndNotifyUpdate()
+
+			ticker := time.NewTicker(4 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopUpdateTicker:
+					return
+				case <-ticker.C:
+					checkAndNotifyUpdate()
+				}
+			}
+		})
+
+		// Second pass: once the window is realized the compositor has placed it on
+		// a monitor, so the frame saved for that specific display can be applied.
+		// Runs on the UI thread via Dispatch; a short delay avoids fighting the
+		// window manager's own initial placement.
+		go guardGoroutine("restore-monitor-frame", func() {
+			time.Sleep(900 * time.Millisecond)
+			w.Dispatch(func() {
+				win := w.Window()
+				if win == nil {
+					return
+				}
+				monitorKey := C.GoString(C.windowMonitorName(win))
+				state := loadWindowStateForMonitor(userDataDir, monitorKey)
+				if state == nil {
+					return
+				}
+				// Wayland exposes no absolute position: keep whatever placement
+				// the compositor chose and only honor a saved size. gtk_window_move
+				// is a no-op there, so the resize-only helper is used to avoid
+				// passing coordinates the compositor never reported.
+				var x, y, curW, curH C.int
+				hasPosition := C.getWindowFrameLinux(win, &x, &y, &curW, &curH) != 0
+				if !hasPosition {
+					if int(curW) == int(state.Width) && int(curH) == int(state.Height) {
+						return
+					}
+					C.resizeWindowTo(win, C.int(state.Width), C.int(state.Height))
+					return
+				}
+				if int(x) == int(state.X) && int(y) == int(state.Y) &&
+					int(curW) == int(state.Width) && int(curH) == int(state.Height) {
+					return // already where it belongs
+				}
+				C.moveWindowTo(win, C.int(state.X), C.int(state.Y), C.int(state.Width), C.int(state.Height))
+			})
+		})
+
+		w.Run()
+		close(stopUpdateTicker)
+		saveWindowState(userDataDir, w.Window(), initialWidth, initialHeight)
+		w.Destroy()
+
+		// Rebuild the engine for the account that is now active. The window is
+		// recreated with the session, so a switch reads as an app restart; the
+		// in-place browser swap path (swapBrowserToActiveAccountLinux) is what
+		// makes the switch seamless whenever the native swap is available.
+	}
+}
+
+// applyActiveAccountProfileDir exports the active account's profile directory
+// as WA_DESK_PROFILE_DIR for the GTK engine. It has to run before a browser
+// widget is created, because the website-data manager is chosen at that exact
+// moment. An unset variable is meaningful rather than a bug: it keeps the
+// original default context for the legacy/first account.
+func applyActiveAccountProfileDir() error {
+	id, err := activeAccountProfileIdentifier()
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return os.Unsetenv("WA_DESK_PROFILE_DIR")
+	}
+	dir, err := accountProfileDir(id)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.Setenv("WA_DESK_PROFILE_DIR", dir)
+}
+
+// swapBrowserToActiveAccountLinux rebuilds the WebView's browser widget in
+// place for whichever account is now active. The GtkWindow, the tray icon and
+// the running gtk_main() loop are all reused and never torn down, so an
+// account switch reads as an in-page reload rather than an app restart.
+//
+// Returns false when the native swap is unavailable, which lets the caller
+// fall back to rebuilding the entire engine.
+func swapBrowserToActiveAccountLinux(w webview.WebView) bool {
+	if err := applyActiveAccountProfileDir(); err != nil {
+		log.Printf("unable to select account profile: %v", err)
+		return false
+	}
+	if C.webview_recreate_browser_active() == 0 {
+		log.Printf("native browser swap unavailable; rebuilding the WebView")
+		return false
+	}
+	cacheDebugLog("account switch: profile=%s", os.Getenv("WA_DESK_PROFILE_DIR"))
+	// The replacement WebKitWebView is brand new; the carried-over user
+	// content manager keeps the init script and bindings installed, so only
+	// the navigation has to happen here.
+	w.Navigate(appURL)
+	return true
 }

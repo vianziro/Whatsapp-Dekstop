@@ -1274,34 +1274,8 @@ public:
     }
     webkit_dmabuf::apply_webkit_dmabuf_workaround();
     // Initialize webview widget
-    m_webview = webkit_web_view_new();
-    WebKitUserContentManager *manager =
-        webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(m_webview));
-    g_signal_connect(manager, "script-message-received::external",
-                     G_CALLBACK(+[](WebKitUserContentManager *,
-                                    WebKitJavascriptResult *r, gpointer arg) {
-                       auto *w = static_cast<gtk_webkit_engine *>(arg);
-                       char *s = get_string_from_js_result(r);
-                       w->on_message(s);
-                       g_free(s);
-                     }),
-                     this);
-    webkit_user_content_manager_register_script_message_handler(manager,
-                                                                "external");
-    init("window.external={invoke:function(s){window.webkit.messageHandlers."
-         "external.postMessage(s);}}");
-
-    gtk_container_add(GTK_CONTAINER(m_window), GTK_WIDGET(m_webview));
-    gtk_widget_show(GTK_WIDGET(m_webview));
-
-    WebKitSettings *settings =
-        webkit_web_view_get_settings(WEBKIT_WEB_VIEW(m_webview));
-    webkit_settings_set_javascript_can_access_clipboard(settings, true);
-    if (debug) {
-      webkit_settings_set_enable_write_console_messages_to_stdout(settings,
-                                                                  true);
-      webkit_settings_set_enable_developer_extras(settings, true);
-    }
+    m_debug = debug;
+    set_up_web_view();
 
     if (m_owns_window) {
       gtk_widget_grab_focus(GTK_WIDGET(m_webview));
@@ -1313,6 +1287,106 @@ public:
   gtk_webkit_engine &operator=(const gtk_webkit_engine &) = delete;
   gtk_webkit_engine(gtk_webkit_engine &&) = delete;
   gtk_webkit_engine &operator=(gtk_webkit_engine &&) = delete;
+
+  // Rebuilds only the browser widget, keeping the GtkWindow and the running
+  // gtk_main() loop untouched. WhatsApp Desk uses this to hand the same window
+  // over to a different account's isolated website-data store instead of
+  // closing the window and constructing a brand new engine, which looked like
+  // an app restart.
+  void recreate_browser_impl() override {
+    if (!m_window || !m_webview) {
+      return;
+    }
+    // Carried over so the registered "external" script message handler and
+    // every injected user script keep working without the host having to
+    // re-register anything. Referenced first: it would otherwise be finalized
+    // together with the widget that is about to be removed.
+    WebKitUserContentManager *preserved_manager =
+        webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(m_webview));
+    g_object_ref(preserved_manager);
+    gtk_container_remove(GTK_CONTAINER(m_window), GTK_WIDGET(m_webview));
+    m_webview = nullptr;
+    set_up_web_view(preserved_manager);
+    g_object_unref(preserved_manager);
+    if (!m_webview) {
+      return;
+    }
+    gtk_container_add(GTK_CONTAINER(m_window), GTK_WIDGET(m_webview));
+    gtk_widget_show(GTK_WIDGET(m_webview));
+    gtk_widget_grab_focus(GTK_WIDGET(m_webview));
+  }
+
+  // Creates (or recreates) the browser widget inside the existing window.
+  // WhatsApp Desk optionally supplies an absolute profile directory through
+  // WA_DESK_PROFILE_DIR before this widget is created: WebKitGTK keeps each
+  // directory's cookies, IndexedDB, service workers and cache separate without
+  // copying any session material between profiles. An unset or empty value
+  // deliberately keeps the historic default context so existing users retain
+  // their pairing. A preserved user-content manager (in-place account swaps)
+  // is installed as a construct property and is never re-registered: its
+  // "external" message handler and user scripts are already attached.
+  void set_up_web_view(WebKitUserContentManager *preserved_manager = nullptr) {
+    const char *profile_dir = std::getenv("WA_DESK_PROFILE_DIR");
+    WebKitWebsiteDataManager *data_manager = nullptr;
+    WebKitWebContext *context = nullptr;
+    if (profile_dir && *profile_dir) {
+      data_manager = webkit_website_data_manager_new(
+          "base-data-directory", profile_dir, "base-cache-directory",
+          profile_dir, nullptr);
+      context = webkit_web_context_new_with_website_data_manager(data_manager);
+    }
+    if (preserved_manager) {
+      if (context) {
+        m_webview = GTK_WIDGET(g_object_new(
+            WEBKIT_TYPE_WEB_VIEW, "user-content-manager", preserved_manager,
+            "web-context", context, nullptr));
+      } else {
+        m_webview = GTK_WIDGET(g_object_new(
+            WEBKIT_TYPE_WEB_VIEW, "user-content-manager", preserved_manager,
+            nullptr));
+      }
+    } else if (context) {
+      m_webview = webkit_web_view_new_with_context(context);
+    } else {
+      m_webview = webkit_web_view_new();
+    }
+    if (context) {
+      g_object_unref(context);
+    }
+    if (data_manager) {
+      g_object_unref(data_manager);
+    }
+    if (!m_webview) {
+      return;
+    }
+
+    WebKitUserContentManager *manager =
+        webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(m_webview));
+    if (!preserved_manager) {
+      g_signal_connect(manager, "script-message-received::external",
+                       G_CALLBACK(+[](WebKitUserContentManager *,
+                                      WebKitJavascriptResult *r, gpointer arg) {
+                         auto *w = static_cast<gtk_webkit_engine *>(arg);
+                         char *s = get_string_from_js_result(r);
+                         w->on_message(s);
+                         g_free(s);
+                       }),
+                       this);
+      webkit_user_content_manager_register_script_message_handler(manager,
+                                                                  "external");
+      init("window.external={invoke:function(s){window.webkit.messageHandlers."
+           "external.postMessage(s);}}");
+    }
+
+    WebKitSettings *settings =
+        webkit_web_view_get_settings(WEBKIT_WEB_VIEW(m_webview));
+    webkit_settings_set_javascript_can_access_clipboard(settings, true);
+    if (m_debug) {
+      webkit_settings_set_enable_write_console_messages_to_stdout(settings,
+                                                                  true);
+      webkit_settings_set_enable_developer_extras(settings, true);
+    }
+  }
 
   virtual ~gtk_webkit_engine() {
     if (m_webview) {
@@ -1465,6 +1539,7 @@ private:
   }
 
   bool m_owns_window{};
+  bool m_debug{};
   GtkWidget *m_window{};
   GtkWidget *m_webview{};
 };

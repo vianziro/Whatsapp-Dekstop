@@ -253,6 +253,30 @@ func isActiveAccount(id string) bool {
 	return err == nil && registry.ActiveAccountID == id
 }
 
+// activeAccountDataPath returns the on-disk profile directory for the active
+// account, creating it when it is new. The first account deliberately returns
+// the legacy profile location (by reference, never a copy), so an existing
+// pairing keeps working; see legacyProfileDir. Engines whose native isolation
+// is path-based — WebView2 user-data folders and the WebKitGTK website data
+// manager — use this as their per-account storage root.
+func activeAccountDataPath() (string, error) {
+	id, err := activeAccountProfileIdentifier()
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return legacyProfileDir(), nil
+	}
+	dir, err := accountProfileDir(id)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 func setActiveAccount(id string) error {
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()

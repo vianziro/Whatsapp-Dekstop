@@ -634,271 +634,337 @@ func runApp() {
 	executablePath, _ := os.Executable()
 	iconFullPath := ensureAppIconFile(userDataDir)
 
-	// WebView2 keeps its HTTP/disk cache inside the user-data dir; cap it.
-	// Synchronous and pre-engine: Chromium cache files are not open yet, so the
-	// delete is always safe here. (A single-instance launch never reaches this
-	// point with another WebView2 of ours alive.)
-	cacheDebugLog("startup: pid=%d profile=%s", os.Getpid(), userDataDir)
-	enforceDiskCacheCapSync(
-		[]string{filepath.Join(userDataDir, "EBWebView")},
-		[]string{
-			filepath.Join(userDataDir, "EBWebView", "Default", "Cache"),
-			filepath.Join(userDataDir, "EBWebView", "Default", "GPUCache"),
-			filepath.Join(userDataDir, "EBWebView", "Default", "Code Cache"),
-			filepath.Join(userDataDir, "EBWebView", "Default", "Service Worker"),
-		},
-		"startup",
-	)
-
-	opts := webview2.WebViewOptions{
-		Window:    nil,
-		Debug:     false,
-		DataPath:  userDataDir,
-		AutoFocus: true,
-		WindowOptions: webview2.WindowOptions{
-			Title:  windowTitle,
-			Width:  windowWidth,
-			Height: windowHeight,
-			IconId: 2,
-			Center: true,
-		},
-	}
-
-	w := webview2.NewWithOptions(opts)
-	if w == nil {
-		log.Fatalln("Gagal inisialisasi WebView2")
-	}
-	defer w.Destroy()
-
-	// WebView2 reserves browser accelerator keys by default, so combinations
-	// such as F5, Ctrl+R and Ctrl+Shift+T never reached the page's own
-	// handlers on Windows. macOS delivers them to the page already; match it.
-	_ = w.SetBrowserAcceleratorKeysEnabled(false)
-
-	hwnd := uintptr(w.Window())
-	configureWindow(hwnd)
-
-	w.SetTitle(windowTitle)
-	w.SetSize(450, 320, webview2.HintMin)
-	w.SetSize(windowWidth, windowHeight, webview2.HintNone)
-
-	if state := loadWindowStateForMonitor(userDataDir, windowMonitorKey(hwnd)); state != nil {
-		procMoveWindow.Call(hwnd, uintptr(int32(state.X)), uintptr(int32(state.Y)), uintptr(int32(state.Width)), uintptr(int32(state.Height)), 1)
-		if state.Maximized {
-			procShowNormal.Call(hwnd, uintptr(SW_MAXIMIZE))
+	// Multi-account: one WebView2 user-data folder per account with only one
+	// live engine at a time (the memory profile recommended by the research
+	// doc). A switch tears this session down and the loop below rebuilds the
+	// engine on the account that is now active. The first account always
+	// resolves to the legacy user-data dir, so the existing pairing is adopted
+	// by reference and never moved.
+	switchRequested := false
+	for !switchRequested {
+		dataDir, dataDirErr := activeAccountDataPath()
+		if dataDirErr != nil {
+			dataDir = userDataDir
 		}
-	}
 
-	_ = w.Bind("saveWindowStateNative", func(width, height int) {
-		saveWindowState(userDataDir, hwnd)
-	})
-
-	// Bind native notification bridge
-	_ = w.Bind("sendNativeNotification", func(title, body string) {
-		go showNativeNotification(title, body, iconFullPath, executablePath)
-	})
-	_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
-	_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
-
-	_ = w.Bind("releaseMemoryNative", func() {
-		// Note: do NOT call w.Suspend() here. The webview2 vendor library already
-		// suspends/resumes the WebView2 renderer symmetrically on real minimize/restore
-		// (see its WM_SIZE handling). Calling Suspend() manually just because the page
-		// is merely hidden (e.g. briefly alt-tabbing without minimizing) has no matching
-		// Resume() call anywhere, which previously left the WebView hidden/frozen. Just
-		// trim reclaimable memory instead, which is always safe to call.
-		debug.FreeOSMemory()
-		curProc, _, _ := procGetCurrentProcess.Call()
-		procSetProcessWorkingSetSize.Call(curProc, ^uintptr(0), ^uintptr(0))
-		debugLogProcessStats("release-memory")
-		enforceDiskCacheCapFrom(
-			[]string{filepath.Join(userDataDir, "EBWebView")},
+		// WebView2 keeps its HTTP/disk cache inside the user-data dir; cap it.
+		// Synchronous and pre-engine: Chromium cache files are not open yet, so the
+		// delete is always safe here. (A single-instance launch never reaches this
+		// point with another WebView2 of ours alive.)
+		cacheDebugLog("startup: pid=%d profile=%s", os.Getpid(), dataDir)
+		enforceDiskCacheCapSync(
+			[]string{filepath.Join(dataDir, "EBWebView")},
 			[]string{
-				filepath.Join(userDataDir, "EBWebView", "Default", "Cache"),
-				filepath.Join(userDataDir, "EBWebView", "Default", "GPUCache"),
-				filepath.Join(userDataDir, "EBWebView", "Default", "Code Cache"),
-				filepath.Join(userDataDir, "EBWebView", "Default", "Service Worker"),
+				filepath.Join(dataDir, "EBWebView", "Default", "Cache"),
+				filepath.Join(dataDir, "EBWebView", "Default", "GPUCache"),
+				filepath.Join(dataDir, "EBWebView", "Default", "Code Cache"),
+				filepath.Join(dataDir, "EBWebView", "Default", "Service Worker"),
 			},
-			"minimize",
+			"startup",
 		)
-	})
 
-	// Bind external link handler to open links in default Windows browser
-	_ = w.Bind("openExternalLink", func(rawURL string) {
-		if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
-			go func() {
-				_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
-			}()
+		opts := webview2.WebViewOptions{
+			Window:    nil,
+			Debug:     false,
+			DataPath:  dataDir,
+			AutoFocus: true,
+			WindowOptions: webview2.WindowOptions{
+				Title:  windowTitle,
+				Width:  windowWidth,
+				Height: windowHeight,
+				IconId: 2,
+				Center: true,
+			},
 		}
-	})
 
-	// Bind Always on Top toggle
-	_ = w.Bind("toggleAlwaysOnTopNative", func() bool {
-		return toggleAlwaysOnTop(hwnd)
-	})
-
-	// Bind Auto-Start query and toggle
-	_ = w.Bind("getAutoStartNative", func() bool {
-		return isAutoStartWindows()
-	})
-	_ = w.Bind("toggleAutoStartNative", func() bool {
-		return toggleAutoStartWindows()
-	})
-
-	// Bind in-app auto updater
-	_ = w.Bind("checkForUpdateNative", func(manual bool) UpdateInfo {
-		info, err := checkForUpdate(appVersion)
-		if err != nil {
-			return UpdateInfo{CurrentVersion: appVersion, CheckError: err.Error()}
+		w := webview2.NewWithOptions(opts)
+		if w == nil {
+			log.Fatalln("Gagal inisialisasi WebView2")
 		}
-		return *info
-	})
 
-	_ = w.Bind("startUpdateNative", func(downloadURL string) {
-		go func() {
-			_ = executeUpdate(w, downloadURL)
-		}()
-	})
+		// WebView2 reserves browser accelerator keys by default, so combinations
+		// such as F5, Ctrl+R and Ctrl+Shift+T never reached the page's own
+		// handlers on Windows. macOS delivers them to the page already; match it.
+		_ = w.SetBrowserAcceleratorKeysEnabled(false)
 
-	// Bind download, preview, and settings handlers
-	_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
-		path, err := saveDownloadedFile(filename, dataURI)
-		if err != nil {
-			return ""
-		}
-		return path
-	})
+		hwnd := uintptr(w.Window())
+		configureWindow(hwnd)
 
-	_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
-		path, err := previewDocument(filename, dataURI)
-		if err != nil {
-			return ""
-		}
-		return path
-	})
+		w.SetTitle(windowTitle)
+		w.SetSize(450, 320, webview2.HintMin)
+		w.SetSize(windowWidth, windowHeight, webview2.HintNone)
 
-	_ = w.Bind("openFileNative", func(filePath string) bool {
-		return openFileInDefaultApp(filePath)
-	})
-
-	// Lazy-load SheetJS library for spreadsheet preview
-	_ = w.Bind("loadXLSXLibraryNative", func() string {
-		return xlsxLibJS
-	})
-
-	_ = w.Bind("getDownloadDirNative", func() string {
-		s := loadSettings()
-		return s.DownloadDir
-	})
-
-	_ = w.Bind("getOrganizeByMonthNative", func() bool {
-		return loadSettings().OrganizeByMonth
-	})
-
-	_ = w.Bind("setOrganizeByMonthNative", func(on bool) bool {
-		return setOrganizeByMonth(on)
-	})
-
-	_ = w.Bind("checkFileExistsNative", func(filename string) bool {
-		return fileExistsInDownloadDir(filename)
-	})
-
-	_ = w.Bind("chooseDownloadDirNative", func() string {
-		selected, err := chooseFolderDialog()
-		if err != nil || selected == "" {
-			return ""
-		}
-		s := loadSettings()
-		s.DownloadDir = selected
-		_ = saveSettings(s)
-		return selected
-	})
-
-	_ = w.Bind("openDownloadDirNative", func() bool {
-		s := loadSettings()
-		_ = openFolderInFileManager(s.DownloadDir)
-		return true
-	})
-
-	_ = w.Bind("resetDownloadDirNative", func() string {
-		s := loadSettings()
-		s.DownloadDir = getDefaultDownloadDir()
-		_ = saveSettings(s)
-		return s.DownloadDir
-	})
-
-	_ = w.Bind("getAppThemeNative", func() string {
-		s := loadSettings()
-		return s.Theme
-	})
-
-	_ = w.Bind("setAppThemeNative", func(theme string) string {
-		saved := saveTheme(theme)
-		applyNativeThemeWin(hwnd, saved)
-		return saved
-	})
-
-	// Spell check bindings
-	_ = w.Bind("getSpellCheckEnabledNative", func() bool {
-		return getSpellCheckEnabled()
-	})
-	_ = w.Bind("setSpellCheckEnabledNative", func(enabled bool) bool {
-		return setSpellCheckEnabled(enabled)
-	})
-	_ = w.Bind("getSpellCheckLangNative", func() string {
-		return getSpellCheckLang()
-	})
-	_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
-		return setSpellCheckLang(lang)
-	})
-	_ = w.Bind("getBlurAvatarsNative", func() bool {
-		return getBlurAvatars()
-	})
-	_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
-		return setBlurAvatars(on)
-	})
-	_ = w.Bind("getPendingCrashNative", func() string {
-		return pendingCrashReport()
-	})
-	_ = w.Bind("markCrashNotifiedNative", func() bool {
-		return markCrashNotified()
-	})
-
-	// Taskbar badge binding
-	_ = w.Bind("updateDockBadge", func(badge string) {
-		count := 0
-		if badge != "" {
-			fmt.Sscanf(badge, "%d", &count)
-		}
-		_ = setTaskbarBadge(hwnd, count)
-	})
-
-	w.Init(getInitScript(userAgent))
-	w.Navigate(appURL)
-
-	// Check for updates in the background after startup & periodically
-	go guardGoroutine("update-ticker", func() {
-		checkAndNotifyUpdate := func() {
-			info, err := checkForUpdate(appVersion)
-			if err == nil && info != nil && info.Available {
-				w.Dispatch(func() {
-					script := fmt.Sprintf("if (window.showUpdateBanner) { window.showUpdateBanner(%q, %q, %q); }",
-						info.LatestVersion, info.ReleaseTitle, info.DownloadURL)
-					w.Eval(script)
-				})
+		if state := loadWindowStateForMonitor(userDataDir, windowMonitorKey(hwnd)); state != nil {
+			procMoveWindow.Call(hwnd, uintptr(int32(state.X)), uintptr(int32(state.Y)), uintptr(int32(state.Width)), uintptr(int32(state.Height)), 1)
+			if state.Maximized {
+				procShowNormal.Call(hwnd, uintptr(SW_MAXIMIZE))
 			}
 		}
 
-		time.Sleep(5 * time.Second)
-		checkAndNotifyUpdate()
+		_ = w.Bind("saveWindowStateNative", func(width, height int) {
+			saveWindowState(userDataDir, hwnd)
+		})
 
-		ticker := time.NewTicker(4 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
+		// Bind native notification bridge
+		_ = w.Bind("sendNativeNotification", func(title, body string) {
+			go showNativeNotification(title, body, iconFullPath, executablePath)
+		})
+		_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
+		_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
+
+		_ = w.Bind("releaseMemoryNative", func() {
+			// Note: do NOT call w.Suspend() here. The webview2 vendor library already
+			// suspends/resumes the WebView2 renderer symmetrically on real minimize/restore
+			// (see its WM_SIZE handling). Calling Suspend() manually just because the page
+			// is merely hidden (e.g. briefly alt-tabbing without minimizing) has no matching
+			// Resume() call anywhere, which previously left the WebView hidden/frozen. Just
+			// trim reclaimable memory instead, which is always safe to call.
+			debug.FreeOSMemory()
+			curProc, _, _ := procGetCurrentProcess.Call()
+			procSetProcessWorkingSetSize.Call(curProc, ^uintptr(0), ^uintptr(0))
+			debugLogProcessStats("release-memory")
+			enforceDiskCacheCapFrom(
+				[]string{filepath.Join(userDataDir, "EBWebView")},
+				[]string{
+					filepath.Join(userDataDir, "EBWebView", "Default", "Cache"),
+					filepath.Join(userDataDir, "EBWebView", "Default", "GPUCache"),
+					filepath.Join(userDataDir, "EBWebView", "Default", "Code Cache"),
+					filepath.Join(userDataDir, "EBWebView", "Default", "Service Worker"),
+				},
+				"minimize",
+			)
+		})
+
+		// Bind external link handler to open links in default Windows browser
+		_ = w.Bind("openExternalLink", func(rawURL string) {
+			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+				go func() {
+					_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
+				}()
+			}
+		})
+
+		// Bind Always on Top toggle
+		_ = w.Bind("toggleAlwaysOnTopNative", func() bool {
+			return toggleAlwaysOnTop(hwnd)
+		})
+
+		// Bind Auto-Start query and toggle
+		_ = w.Bind("getAutoStartNative", func() bool {
+			return isAutoStartWindows()
+		})
+		_ = w.Bind("toggleAutoStartNative", func() bool {
+			return toggleAutoStartWindows()
+		})
+
+		// Bind in-app auto updater
+		_ = w.Bind("checkForUpdateNative", func(manual bool) UpdateInfo {
+			info, err := checkForUpdate(appVersion)
+			if err != nil {
+				return UpdateInfo{CurrentVersion: appVersion, CheckError: err.Error()}
+			}
+			return *info
+		})
+
+		_ = w.Bind("startUpdateNative", func(downloadURL string) {
+			go func() {
+				_ = executeUpdate(w, downloadURL)
+			}()
+		})
+
+		// Bind download, preview, and settings handlers
+		_ = w.Bind("saveDownloadedFileNative", func(filename, dataURI string) string {
+			path, err := saveDownloadedFile(filename, dataURI)
+			if err != nil {
+				return ""
+			}
+			return path
+		})
+
+		_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
+			path, err := previewDocument(filename, dataURI)
+			if err != nil {
+				return ""
+			}
+			return path
+		})
+
+		_ = w.Bind("openFileNative", func(filePath string) bool {
+			return openFileInDefaultApp(filePath)
+		})
+
+		// Lazy-load SheetJS library for spreadsheet preview
+		_ = w.Bind("loadXLSXLibraryNative", func() string {
+			return xlsxLibJS
+		})
+
+		_ = w.Bind("getDownloadDirNative", func() string {
+			s := loadSettings()
+			return s.DownloadDir
+		})
+
+		_ = w.Bind("getOrganizeByMonthNative", func() bool {
+			return loadSettings().OrganizeByMonth
+		})
+
+		_ = w.Bind("setOrganizeByMonthNative", func(on bool) bool {
+			return setOrganizeByMonth(on)
+		})
+
+		_ = w.Bind("checkFileExistsNative", func(filename string) bool {
+			return fileExistsInDownloadDir(filename)
+		})
+
+		_ = w.Bind("chooseDownloadDirNative", func() string {
+			selected, err := chooseFolderDialog()
+			if err != nil || selected == "" {
+				return ""
+			}
+			s := loadSettings()
+			s.DownloadDir = selected
+			_ = saveSettings(s)
+			return selected
+		})
+
+		_ = w.Bind("openDownloadDirNative", func() bool {
+			s := loadSettings()
+			_ = openFolderInFileManager(s.DownloadDir)
+			return true
+		})
+
+		_ = w.Bind("resetDownloadDirNative", func() string {
+			s := loadSettings()
+			s.DownloadDir = getDefaultDownloadDir()
+			_ = saveSettings(s)
+			return s.DownloadDir
+		})
+
+		_ = w.Bind("getAppThemeNative", func() string {
+			s := loadSettings()
+			return s.Theme
+		})
+
+		_ = w.Bind("setAppThemeNative", func(theme string) string {
+			saved := saveTheme(theme)
+			applyNativeThemeWin(hwnd, saved)
+			return saved
+		})
+
+		// Spell check bindings
+		_ = w.Bind("getSpellCheckEnabledNative", func() bool {
+			return getSpellCheckEnabled()
+		})
+		_ = w.Bind("setSpellCheckEnabledNative", func(enabled bool) bool {
+			return setSpellCheckEnabled(enabled)
+		})
+		_ = w.Bind("getSpellCheckLangNative", func() string {
+			return getSpellCheckLang()
+		})
+		_ = w.Bind("setSpellCheckLangNative", func(lang string) string {
+			return setSpellCheckLang(lang)
+		})
+		_ = w.Bind("getBlurAvatarsNative", func() bool {
+			return getBlurAvatars()
+		})
+		_ = w.Bind("setBlurAvatarsNative", func(on bool) bool {
+			return setBlurAvatars(on)
+		})
+		_ = w.Bind("getPendingCrashNative", func() string {
+			return pendingCrashReport()
+		})
+		_ = w.Bind("markCrashNotifiedNative", func() bool {
+			return markCrashNotified()
+		})
+
+		// Taskbar badge binding
+		_ = w.Bind("updateDockBadge", func(badge string) {
+			count := 0
+			if badge != "" {
+				fmt.Sscanf(badge, "%d", &count)
+			}
+			_ = setTaskbarBadge(hwnd, count)
+		})
+
+		// Account bridge: display-only metadata over the wire, never a profile
+		// path. A switch ends this session; the loop in runApp rebuilds the engine
+		// with the user-data folder of the account that is now active.
+		_ = w.Bind("getAccountsNative", func() []map[string]any {
+			accounts, err := accountsForUI()
+			if err != nil {
+				return []map[string]any{}
+			}
+			return accounts
+		})
+		_ = w.Bind("createAccountNative", func(label string) map[string]any {
+			account, err := createAccount(label)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("renameAccountNative", func(id, label string) map[string]any {
+			account, err := renameAccount(id, label)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("requestAccountSwitchNative", func(id string) bool {
+			if switchRequested || isActiveAccount(id) || setActiveAccount(id) != nil {
+				return false
+			}
+			switchRequested = true
+			// End the session only after this bridge call has returned; the next
+			// loop iteration destroys this engine and builds the new one.
+			w.Dispatch(func() { w.Terminate() })
+			return true
+		})
+
+		w.Init(getInitScript(userAgent))
+		w.Navigate(appURL)
+
+		// Check for updates in the background after startup & periodically. The
+		// ticker is stopped before this session's engine is destroyed so it never
+		// Dispatches into a dead WebView after an account switch.
+		stopUpdateTicker := make(chan struct{})
+		go guardGoroutine("update-ticker", func() {
+			checkAndNotifyUpdate := func() {
+				info, err := checkForUpdate(appVersion)
+				if err == nil && info != nil && info.Available {
+					w.Dispatch(func() {
+						script := fmt.Sprintf("if (window.showUpdateBanner) { window.showUpdateBanner(%q, %q, %q); }",
+							info.LatestVersion, info.ReleaseTitle, info.DownloadURL)
+						w.Eval(script)
+					})
+				}
+			}
+
+			select {
+			case <-stopUpdateTicker:
+				return
+			case <-time.After(5 * time.Second):
+			}
 			checkAndNotifyUpdate()
-		}
-	})
 
-	defer saveWindowState(userDataDir, hwnd)
-	w.Run()
+			ticker := time.NewTicker(4 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopUpdateTicker:
+					return
+				case <-ticker.C:
+					checkAndNotifyUpdate()
+				}
+			}
+		})
+
+		w.Run()
+		close(stopUpdateTicker)
+		saveWindowState(userDataDir, hwnd)
+		w.Destroy()
+
+		// Rebuild the engine for the account that is now active. The window is
+		// recreated with the session, so a switch reads as an app restart on
+		// Windows; the research doc accepts that for the one-live-engine model.
+	}
 }

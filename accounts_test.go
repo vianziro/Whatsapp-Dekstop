@@ -48,6 +48,43 @@ func TestAccountRegistryAllowsAtMostTwoAccounts(t *testing.T) {
 	}
 }
 
+func TestActiveAccountDataPathAdoptsLegacyProfileByReference(t *testing.T) {
+	withAccountRegistryFile(t)
+
+	got, err := activeAccountDataPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != legacyProfileDir() {
+		t.Fatalf("first account must resolve to the legacy profile dir %q, got %q", legacyProfileDir(), got)
+	}
+}
+
+func TestActiveAccountDataPathIsolatesSecondAccount(t *testing.T) {
+	withAccountRegistryFile(t)
+	if _, err := loadAccountRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := createAccount("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setActiveAccount(second.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := activeAccountDataPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == legacyProfileDir() {
+		t.Fatal("second account must never use the legacy profile dir")
+	}
+	if filepath.Base(got) != second.ID {
+		t.Fatalf("second account profile dir must be named by its account id, got %q", got)
+	}
+}
+
 func TestAccountRegistryPersistsActiveAccountAndRename(t *testing.T) {
 	withAccountRegistryFile(t)
 	initial, err := loadAccountRegistry()
