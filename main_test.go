@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -1397,5 +1398,186 @@ func TestWindowsAccountSwitchRebuildsInsteadOfExiting(t *testing.T) {
 	}
 	if drainIdx < destroyIdx {
 		t.Error("the message queue must be drained after w.Destroy(), before the next engine is built")
+	}
+}
+
+// TestIdleMemoryReloadGateIsFailClosed runs the real injected script against a
+// WhatsApp-shaped DOM and asserts that window.waIdleReloadAllowed permits a
+// reload only when the window is off screen, the page is online and loaded, and
+// nothing the user started is in flight.
+//
+// The gate is the only thing standing between a memory optimisation and losing
+// an in-flight upload, so it is asserted by behaviour rather than by string
+// match: each refusal below was confirmed to go red when its clause is removed.
+func TestIdleMemoryReloadGateIsFailClosed(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not available")
+	}
+	harness := filepath.Join("testdata", "idle_reload_harness.js")
+	if _, err := os.Stat(harness); err != nil {
+		t.Skipf("harness missing: %v", err)
+	}
+
+	tmp := t.TempDir()
+	scriptPath := filepath.Join(tmp, "init_script.js")
+	if err := os.WriteFile(scriptPath, []byte(getInitScript("test-agent")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(node, harness, scriptPath)
+	cmd.Env = append(os.Environ(), "NODE_PATH="+jsdomNodePath())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") || strings.Contains(err.Error(), "permission denied") {
+			t.Skipf("skipping node execution in sandboxed environment: %v", err)
+		}
+		var reason struct{ Skipped, Message string }
+		_ = json.Unmarshal(out, &reason)
+		if reason.Skipped != "" {
+			t.Skip(reason.Skipped)
+		}
+		t.Fatalf("the idle-reload gate is not fail-closed: %v\n%s", err, out)
+	}
+	t.Logf("harness output:\n%s", out)
+}
+
+// TestIdleMemoryReloadAsksThePageFirst pins the ordering that makes the reload
+// safe on the native side. The page owns the last word -- it is the only place
+// that knows about an in-flight upload or an open document preview -- and the
+// window must be re-checked after that answer arrives, because the user can
+// come back while the question is still in flight.
+func TestIdleMemoryReloadAsksThePageFirst(t *testing.T) {
+	source, err := os.ReadFile("app_darwin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := string(source)
+
+	ask := strings.Index(native, "return String(window.waIdleReloadRefusalReason() || '')")
+	reload := strings.Index(native, "[wv reload]")
+	if ask < 0 {
+		t.Fatal("the native watcher must ask the page for permission before reloading")
+	}
+	if reload < 0 {
+		t.Fatal("the native watcher must actually reload the page; without it the renderer never releases its memory")
+	}
+	if ask > reload {
+		t.Fatal("the permission question must precede the reload, not follow it")
+	}
+	// A bare boolean made "the page refused" indistinguishable from a dozen
+	// other situations, so the log could not explain a reload that never came.
+	if !strings.Contains(native, "waIdleReloadRefusalReason") {
+		t.Fatal("the page must be asked why, not just whether; the log has to name the condition")
+	}
+
+	// The countdown is what keeps an ordinary alt-tab from destroying scroll
+	// position, so it must be a real delay rather than an immediate trigger.
+	if !strings.Contains(native, "kIdleReloadAfterSeconds = 15 * 60") {
+		t.Fatal("the reload must wait a minimum time off screen so an alt-tab never triggers it")
+	}
+	if !strings.Contains(native, "idleReloadWindowIsHidden()") {
+		t.Fatal("the reload must be conditioned on the window being off screen")
+	}
+	// Settings must be able to switch the whole thing off.
+	if !strings.Contains(native, "getIdleMemoryReload") {
+		t.Fatal("the native watcher must honour the IdleMemoryReload setting")
+	}
+}
+
+// TestDownloadFailureExplainsItself covers the diagnosability half of #68. The
+// user saw "Failed to save file." with nothing else: the native side knew the
+// reason (an unusable folder, a rejected name, a refused write) and threw it
+// away, so the report could not be acted on. The page must now read the reason
+// back and put it in front of the user, and must also say when a file landed in
+// the default folder rather than the one that was configured.
+func TestDownloadFailureExplainsItself(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(source)
+
+	if !strings.Contains(page, "getLastDownloadIssueNative") {
+		t.Fatal("the page must ask the native side why a save failed; a bare failure is what made #68 unreportable")
+	}
+
+	fail := strings.Index(page, "❌ Failed to save file.")
+	if fail < 0 {
+		t.Fatal("the failure toast disappeared; the download path no longer reports failure at all")
+	}
+	// The reason has to be read before the toast that shows it.
+	read := strings.Index(page, "var reason = window.getLastDownloadIssueNative")
+	if read < 0 || read > fail {
+		t.Fatal("the reason must be read before the failure toast is shown")
+	}
+
+	// A file that lands somewhere other than the configured folder must not be
+	// reported as an ordinary success.
+	if !strings.Contains(page, "Saved to the default folder") {
+		t.Fatal("a fallback save must say so instead of looking like a normal save")
+	}
+}
+
+// TestIdleReloadCountdownIsShortenableWithoutARebuild pins the two ways the
+// 15-minute countdown can be shortened. The environment variable alone is not
+// enough: macOS does not give a double-clicked bundle the shell's environment,
+// so a user asked to reproduce the reload would have no way to do it — which is
+// exactly why the diagnostics flag already has a file form.
+func TestIdleReloadCountdownIsShortenableWithoutARebuild(t *testing.T) {
+	source, err := os.ReadFile("app_darwin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := string(source)
+
+	if !strings.Contains(native, "WA_IDLE_RELOAD_SECONDS") {
+		t.Fatal("the environment override disappeared; a direct run can no longer shorten the countdown")
+	}
+	if !strings.Contains(native, "idle_reload_seconds") {
+		t.Fatal("the file override disappeared; a Finder launch can no longer shorten the countdown")
+	}
+	// A hostile or fat-fingered value must not become a reload loop.
+	if !strings.Contains(native, "overrideSeconds <= 24 * 60 * 60") {
+		t.Fatal("the override must stay bounded; an unbounded value turns the feature into a reload loop")
+	}
+}
+
+// TestIdleReloadHiddenMeansOffScreenNotUnfocused pins what "hidden" has to mean
+// on the native side, because the two sides must agree or the reload silently
+// never fires.
+//
+// The page reads document.hidden, which WebKit derives from the window actually
+// being out of sight. An earlier revision made the native check also treat
+// "another app has focus" as hidden; the page disagreed, refused every time, and
+// the feature was dead in the case it exists for. Being unfocused while still on
+// screen is not out of sight, and reloading there would blank a page the user is
+// looking at.
+func TestIdleReloadHiddenMeansOffScreenNotUnfocused(t *testing.T) {
+	source, err := os.ReadFile("app_darwin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := string(source)
+
+	start := strings.Index(native, "static BOOL idleReloadWindowIsHidden(void) {")
+	if start < 0 {
+		t.Fatal("idleReloadWindowIsHidden disappeared; the reload is no longer conditioned on the window being off screen")
+	}
+	end := strings.Index(native[start:], "\n}")
+	if end < 0 {
+		t.Fatal("could not read the body of idleReloadWindowIsHidden")
+	}
+	body := native[start : start+end]
+
+	if strings.Contains(body, "NSApp isActive") {
+		t.Fatal("the native check must not treat an unfocused-but-visible window as hidden: " +
+			"the page reports document.hidden == false there and refuses, so the reload never fires")
+	}
+	// The signals that genuinely mean out of sight must stay.
+	for _, want := range []string{"isMiniaturized", "isVisible", "occlusionState"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("idleReloadWindowIsHidden must still consider %s", want)
+		}
 	}
 }

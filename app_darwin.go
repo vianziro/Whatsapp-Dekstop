@@ -160,6 +160,11 @@ static void triggerNativeMemoryPurge(void) {
     purgeWebKitMemory();
 }
 
+// Declared before the delegates that report visibility changes; defined further
+// down, once appWebView() exists.
+static void idleMemoryReloadWindowVisibilityChanged(void);
+static void startIdleMemoryReloadWatcher(void);
+
 @interface WhatsAppWindowDelegate : NSObject <NSWindowDelegate>
 @end
 
@@ -167,13 +172,27 @@ static void triggerNativeMemoryPurge(void) {
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     [sender orderOut:nil];
     purgeWebKitMemory();
+    idleMemoryReloadWindowVisibilityChanged();
     return NO;
 }
 - (void)windowDidMiniaturize:(NSNotification *)notification {
     purgeWebKitMemory();
+    idleMemoryReloadWindowVisibilityChanged();
+}
+- (void)windowDidDeminiaturize:(NSNotification *)notification {
+    idleMemoryReloadWindowVisibilityChanged();
 }
 - (void)windowDidResignKey:(NSNotification *)notification {
     // Keep media playback and streaming buffers intact when switching windows
+    idleMemoryReloadWindowVisibilityChanged();
+}
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    idleMemoryReloadWindowVisibilityChanged();
+}
+// AppKit posts this whenever the window starts or stops being on screen, which
+// is exactly the signal the idle-reload countdown needs.
+- (void)windowDidChangeOcclusionState:(NSNotification *)notification {
+    idleMemoryReloadWindowVisibilityChanged();
 }
 @end
 
@@ -182,6 +201,16 @@ static void triggerNativeMemoryPurge(void) {
 @end
 
 @implementation WhatsAppAppDelegate
+// The idle-reload countdown is driven by whether the window is actually on
+// screen, but these two make it react the instant the app is backgrounded or
+// brought forward instead of waiting for the next timer tick.
+- (void)applicationDidResignActive:(NSNotification *)notification {
+    idleMemoryReloadWindowVisibilityChanged();
+}
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    idleMemoryReloadWindowVisibilityChanged();
+}
+
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
     if (self.window) {
         [self.window makeKeyAndOrderFront:nil];
@@ -296,6 +325,9 @@ static void setWKWebViewUserAgentAndMedia(void* nsWindowPtr, const char* uaStr) 
         configureWebKitMemoryLimits();
         NSWindow* win = (__bridge NSWindow*)nsWindowPtr;
         g_mainWindow = win;
+        // Begins the off-screen memory-reload countdown; see the comment above
+        // startIdleMemoryReloadWatcher.
+        startIdleMemoryReloadWatcher();
         NSView* contentView = [win contentView];
         WKWebView* wv = [contentView isKindOfClass:[WKWebView class]] ? (WKWebView*)contentView : findWKWebView(contentView);
         if (wv) {
@@ -539,6 +571,199 @@ static void evaluateAppJavaScript(NSString* script) {
             NSLog(@"[WhatsApp Desk] Error: WKWebView not found for script: %@", script);
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Idle memory reload
+//
+// Measured 2026-09-30: the WebContent renderer holds ~2 GB on a long-lived
+// session (WebKit malloc 1.35 GB + JS VM Gigacage 358 MB + IOSurface 86 MB),
+// because it keeps every media item the page has decoded alive. Purging the
+// memory cache reclaims only ~6% of that -- the rest is live page data WebKit
+// is not allowed to drop. A page load is the only thing that returns it, since
+// the old JS context, its typed arrays and the decoded images all go away
+// together.
+//
+// The reload is therefore gated so it can only happen while nobody is looking:
+//   * the window must be off screen for kIdleReloadAfterSeconds, so an alt-tab
+//     never triggers it;
+//   * at most one reload per kIdleReloadCooldownSeconds;
+//   * the page gets the final say through window.waIdleReloadAllowed(), which
+//     knows about in-flight uploads and open previews;
+//   * and the whole feature is switchable in Settings.
+// ---------------------------------------------------------------------------
+
+static const NSTimeInterval kIdleReloadAfterSeconds = 15 * 60;
+static const NSTimeInterval kIdleReloadCooldownSeconds = 30 * 60;
+static const NSTimeInterval kIdleReloadTickSeconds = 60;
+
+// Effective off-screen delay. Zero means "use kIdleReloadAfterSeconds"; it is
+// only ever set by the WA_IDLE_RELOAD_SECONDS support override, so the whole
+// path (occlusion -> page gate -> reload) can be exercised without waiting a
+// quarter of an hour. The default is a const rather than a #define, so this has
+// to be a runtime value rather than an initialiser.
+static NSTimeInterval g_idleReloadAfterSeconds = 0;
+
+static dispatch_source_t g_idleReloadTimer = nil;
+static NSTimeInterval g_idleReloadHiddenSince = 0;
+static NSTimeInterval g_idleReloadLastAt = 0;
+// Mirrors the IdleMemoryReload setting. C cannot call back into Go, so Go
+// pushes the value here whenever it loads or changes it.
+static BOOL g_idleReloadEnabled = YES;
+
+static void setIdleReloadEnabled(int on) {
+    g_idleReloadEnabled = on ? YES : NO;
+    if (!g_idleReloadEnabled) {
+        g_idleReloadHiddenSince = 0;
+        g_idleReloadLastAt = 0;
+    }
+}
+
+// The page's own gate reads document.hidden, which WebKit derives from whether
+// the window is actually out of sight, so this check has to mean the same
+// thing. "Off screen" is: minimised, hidden, or fully covered by another
+// window. Merely being *inactive* -- another app has focus but this window is
+// still on screen -- does not count: the user can see it, and reloading there
+// would blank a page in front of them.
+//
+// An earlier revision treated !NSApp.isActive as hidden. That was wrong, and
+// the disagreement it created is what made the reload never fire: the native
+// side called the window hidden, the page reported document.hidden == false,
+// and the gate refused every time. Measured 2026-10-04 with the page's refusal
+// reason logged: 81 s after another app took focus, the reason was still "the
+// window is not hidden" while the native check had already declared it hidden.
+static BOOL idleReloadWindowIsHidden(void) {
+    NSWindow* win = g_mainWindow;
+    if (!win) return YES;
+    if ([win isMiniaturized]) return YES;
+    if (![win isVisible]) return YES;
+    return ([win occlusionState] & NSWindowOcclusionStateVisible) == 0;
+}
+
+// The reload is silent by design, so "did it fire, and if not why" has to stay
+// answerable afterwards. NSLog only reaches the unified log, which is awkward to
+// collect from a user's machine, so these events are also appended next to the
+// profile. They are rare -- at most a few lines per hidden period.
+static void logIdleReloadEvent(NSString* message) {
+    @autoreleasepool {
+        NSString* dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/WhatsAppDesk"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString* path = [dir stringByAppendingPathComponent:@"wa_idle_reload.log"];
+        NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+        [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+        NSString* line = [NSString stringWithFormat:@"[%@] %@\n", [formatter stringFromDate:[NSDate date]], message];
+        NSData* data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileHandle* handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!handle) {
+            [data writeToFile:path atomically:YES];
+            return;
+        }
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+        } @catch (NSException* e) {}
+        [handle closeFile];
+    }
+}
+
+// A page refusal is worth recording once per hidden period, not once per tick.
+static BOOL g_idleReloadRefusalLogged = NO;
+
+static void idleMemoryReloadWindowVisibilityChanged(void) {
+    if (idleReloadWindowIsHidden()) {
+        if (g_idleReloadHiddenSince == 0) {
+            g_idleReloadHiddenSince = [NSDate timeIntervalSinceReferenceDate];
+        }
+        return;
+    }
+    g_idleReloadHiddenSince = 0;
+    g_idleReloadRefusalLogged = NO;
+}
+
+static void idleMemoryReloadTick(void) {
+    if (!g_idleReloadEnabled) return;
+    if (!idleReloadWindowIsHidden()) {
+        g_idleReloadHiddenSince = 0;
+        g_idleReloadRefusalLogged = NO;
+        return;
+    }
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (g_idleReloadHiddenSince == 0) {
+        g_idleReloadHiddenSince = now;
+        return;
+    }
+    NSTimeInterval delay = g_idleReloadAfterSeconds > 0 ? g_idleReloadAfterSeconds : kIdleReloadAfterSeconds;
+    if (now - g_idleReloadHiddenSince < delay) return;
+    if (g_idleReloadLastAt != 0 && now - g_idleReloadLastAt < kIdleReloadCooldownSeconds) return;
+
+    WKWebView* wv = appWebView();
+    if (!wv) return;
+    // Ask before acting. Reloading through an upload or an open document
+    // preview would throw the user's work away, and only the page can tell.
+    //
+    // The page answers with "" when a reload is safe and a short reason when it
+    // is not, rather than a bare boolean: "the page refused" is true of a dozen
+    // different situations, and a report that the memory never came back cannot
+    // be acted on without knowing which one tripped.
+    [wv evaluateJavaScript:@"(function(){ try { if (typeof window.waIdleReloadRefusalReason === 'function') return String(window.waIdleReloadRefusalReason() || ''); return (typeof window.waIdleReloadAllowed === 'function' && window.waIdleReloadAllowed()) ? '' : 'the page has no idle-reload gate'; } catch (e) { return 'the page gate threw: ' + e; } })()"
+         completionHandler:^(id result, NSError *error) {
+        NSString* refusal = error ? error.localizedDescription : [result description];
+        if (refusal && [refusal length] > 0) {
+            if (!g_idleReloadRefusalLogged) {
+                g_idleReloadRefusalLogged = YES;
+                logIdleReloadEvent([NSString stringWithFormat:@"due, but not reloading: %@", refusal]);
+            }
+            return;
+        }
+        // The user may have come back while the question was in flight.
+        if (!idleReloadWindowIsHidden()) return;
+        g_idleReloadLastAt = [NSDate timeIntervalSinceReferenceDate];
+        NSTimeInterval hiddenFor = (g_idleReloadLastAt - g_idleReloadHiddenSince) / 60.0;
+        NSLog(@"[WhatsApp Desk] idle memory reload: page reloaded after %.0f min off screen", hiddenFor);
+        logIdleReloadEvent([NSString stringWithFormat:@"reloading after %.0f min hidden", hiddenFor]);
+        [wv reload];
+    }];
+}
+
+static void startIdleMemoryReloadWatcher(void) {
+    if (g_idleReloadTimer) return;
+    // Support/test override, in seconds. Rejected unless it is a sane positive
+    // value, so a stray environment variable cannot turn the feature into a
+    // reload loop.
+    //
+    // Two spellings, because the environment one does not reach a Finder
+    // launch: macOS does not hand a double-clicked bundle the shell's
+    // environment, which is the same reason debugEnabled() reads a file. The
+    // file form is what a user can actually be asked for when a report needs
+    // the countdown shortened; the variable form stays for a direct run.
+    long overrideSeconds = 0;
+    const char* override = getenv("WA_IDLE_RELOAD_SECONDS");
+    if (override) {
+        overrideSeconds = strtol(override, NULL, 10);
+    } else {
+        NSString* file = [NSHomeDirectory() stringByAppendingPathComponent:
+            @"Library/Application Support/WhatsAppDesk/idle_reload_seconds"];
+        NSString* contents = [NSString stringWithContentsOfFile:file
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:nil];
+        if (contents) {
+            overrideSeconds = strtol([contents UTF8String], NULL, 10);
+        }
+    }
+    if (overrideSeconds > 0 && overrideSeconds <= 24 * 60 * 60) {
+        g_idleReloadAfterSeconds = (NSTimeInterval)overrideSeconds;
+        NSLog(@"[WhatsApp Desk] idle memory reload: off-screen delay overridden to %lds", overrideSeconds);
+        logIdleReloadEvent([NSString stringWithFormat:@"off-screen delay overridden to %lds", overrideSeconds]);
+    }
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    if (!timer) return;
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kIdleReloadTickSeconds * NSEC_PER_SEC)),
+                              (uint64_t)(kIdleReloadTickSeconds * NSEC_PER_SEC),
+                              30ull * NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{ idleMemoryReloadTick(); });
+    g_idleReloadTimer = timer;
+    dispatch_resume(g_idleReloadTimer);
 }
 
 @interface PDFPreviewWindowDelegate : NSObject <NSWindowDelegate>
@@ -1189,6 +1414,17 @@ func showNativeNotification(title, message string) {
 	C.postNativeMacNotification(cTitle, cMsg)
 }
 
+// applyIdleReloadSetting mirrors the IdleMemoryReload preference into the
+// Objective-C watcher. C code cannot call back into Go, so the setting is
+// pushed across whenever it is loaded or changed rather than read on demand.
+func applyIdleReloadSetting(enabled bool) {
+	if enabled {
+		C.setIdleReloadEnabled(1)
+		return
+	}
+	C.setIdleReloadEnabled(0)
+}
+
 func runApp() {
 	lockFile, isSingle := checkSingleInstance()
 	if !isSingle {
@@ -1292,6 +1528,18 @@ func runApp() {
 			}
 		})
 
+		// Idle memory reload. The renderer keeps ~2 GB of decoded media alive and
+		// purging its memory cache reclaims only ~6% of that, so the native side
+		// reloads the page once the window has been off screen for a while. Go
+		// owns the preference, C owns the timing (startIdleMemoryReloadWatcher).
+		applyIdleReloadSetting(getIdleMemoryReload())
+		_ = w.Bind("getIdleMemoryReloadNative", getIdleMemoryReload)
+		_ = w.Bind("setIdleMemoryReloadNative", func(on bool) bool {
+			saved := setIdleMemoryReload(on)
+			applyIdleReloadSetting(saved)
+			return saved
+		})
+
 		// Page-side diagnostics (drag & drop, document preview, switch steps).
 		// No-op unless diagnostics are enabled, so it costs one stat call.
 		_ = w.Bind("waDiagNative", diagLogFromPage)
@@ -1358,6 +1606,10 @@ func runApp() {
 			}
 			return path
 		})
+
+		// Why the last save did not go exactly as asked: the error, or a note
+		// that the file went to the default folder instead (#68).
+		_ = w.Bind("getLastDownloadIssueNative", getLastDownloadIssue)
 
 		_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
 			path, err := previewDocument(filename, dataURI)

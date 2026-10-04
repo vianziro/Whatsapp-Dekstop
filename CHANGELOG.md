@@ -17,7 +17,52 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ---
 
-## [Unreleased]
+## [1.6.3] - 2026-10-04
+
+> Attachment Saving Fixed & Idle Memory Reload
+
+### Added
+
+- macOS: an optional **idle memory reload** frees the renderer's memory while the app is out of
+  sight. WebKit's WebContent process keeps every media item the page has decoded — measured at
+  ~2 GB on a long-lived session — and purging its memory cache reclaims only about 6% of that,
+  because the rest is live page data WebKit is not allowed to drop. Once the window has been off
+  screen for 15 minutes the page is reloaded, which releases the decoded images, the JavaScript
+  heap and its typed arrays together. It only ever runs while the window is hidden, so an ordinary
+  alt-tab cannot trigger it; it runs at most once every 30 minutes; and the page is asked first —
+  `window.waIdleReloadAllowed()` refuses while offline, while an upload is in flight, while a
+  document preview is open, or before the chat list has loaded. "Hidden" means out of sight —
+  minimised, hidden, or fully covered by another window — not merely unfocused, so a window the
+  user can still see is never reloaded underneath them. Switch it off under
+  Settings → Maintenance.
+- The idle-reload countdown can be shortened for a support session by writing the number of
+  seconds into `idle_reload_seconds` in the app's profile folder
+  (`~/Library/Application Support/WhatsAppDesk/`). The environment variable
+  `WA_IDLE_RELOAD_SECONDS` does the same for a direct run, but macOS does not give a
+  double-clicked bundle the shell's environment, so the file is the form a user can actually be
+  asked to set. Either way the value must be a sane positive number of seconds, so it can never
+  turn the feature into a reload loop. Each reload and each refusal is appended to
+  `wa_idle_reload.log` in the same folder, and a refusal names the condition that blocked it
+  ("the window is not hidden", "the chat list is not loaded", …) rather than leaving the reader to
+  guess which of several situations applied.
+
+### Fixed
+
+- Saving an attachment no longer fails because of the name it was sent with. The filename comes
+  straight from the chat and reached the filesystem with nothing removed but the path separators,
+  so on Windows a document such as `Rapat 12:30.pdf` was rejected outright — `< > : " | ? *` are
+  illegal there — and a name ending in a dot or space was silently renamed. Names are now cleaned
+  of those characters, of control characters, of trailing dots and spaces, and of the reserved
+  device names (`CON`, `NUL`, `COM1`…), consistently on every platform, so the same attachment is
+  saved under the same name wherever the app runs (#68).
+- A download folder that cannot be used no longer ends the save. If the configured folder was
+  deleted, sits on a drive that is no longer mounted, or is refused by Windows' Controlled Folder
+  Access, the attachment is written to the default folder instead of being lost, and the toast says
+  where it actually went rather than reporting an ordinary success (#68).
+- A failed save now explains itself. The native side knew why it refused — an unusable folder, a
+  rejected name, a refused write — and threw the reason away, so the user saw only "Failed to save
+  file." with nothing to act on and no way to report it. The reason is now shown in the toast and
+  recorded in the page diagnostics (#68).
 
 ## [1.6.2] - 2026-09-28
 

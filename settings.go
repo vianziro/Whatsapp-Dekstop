@@ -18,6 +18,33 @@ import (
 
 var downloadFileMu sync.Mutex
 
+// downloadIssue records why the most recent attachment save did not go exactly
+// as asked. The page used to be told only "it failed" (an empty path), which is
+// how #68 became unreportable: the user saw "Failed to save file." with nothing
+// to act on and no way to say what went wrong. The reason now travels back with
+// the result and is shown in the toast.
+var (
+	downloadIssueMu sync.Mutex
+	downloadIssue   string
+)
+
+// recordDownloadIssue stores the note for the most recent save. An empty string
+// means the save went to the configured folder with nothing to report.
+func recordDownloadIssue(msg string) {
+	downloadIssueMu.Lock()
+	downloadIssue = msg
+	downloadIssueMu.Unlock()
+}
+
+// getLastDownloadIssue reports why the most recent save did not go exactly as
+// asked: the error when it failed outright, or a note when it had to fall back
+// to the default folder. Empty means it went to the configured folder.
+func getLastDownloadIssue() string {
+	downloadIssueMu.Lock()
+	defer downloadIssueMu.Unlock()
+	return downloadIssue
+}
+
 type AppSettings struct {
 	DownloadDir          string `json:"download_dir"`
 	NotifyOnDownload     bool   `json:"notify_on_download"`
@@ -27,6 +54,12 @@ type AppSettings struct {
 	SpellCheckEnabled    bool   `json:"spell_check_enabled"`
 	SpellCheckLang       string `json:"spell_check_lang"`
 	BlurAvatars          bool   `json:"blur_avatars"`
+	// IdleMemoryReload lets macOS reload the page while the window has been
+	// hidden for a while, so WebKit's WebContent process hands back the media
+	// it has decoded. Measured 2026-09-30: that process holds ~2 GB on a
+	// long-lived session, and purging its memory cache reclaims only ~6% of it
+	// -- a page load is the only thing that returns the rest.
+	IdleMemoryReload bool `json:"idle_memory_reload"`
 	// LastCrashNotified is the unix time of the crash log last surfaced to
 	// the user via the issue reporter, so the startup nudge fires once.
 	LastCrashNotified int64 `json:"last_crash_notified"`
@@ -67,6 +100,9 @@ func loadSettings() *AppSettings {
 		Theme:                "dark",
 		SpellCheckEnabled:    true,
 		SpellCheckLang:       "auto",
+		// On by default: it only ever runs while the window is hidden, and the
+		// page gets the final say (see window.waIdleReloadAllowed).
+		IdleMemoryReload: true,
 	}
 	data, err := os.ReadFile(getSettingsFilePath())
 	if err != nil {
@@ -110,6 +146,17 @@ func setNotificationsEnabled(enabled bool) bool {
 	return s.NotificationsEnabled
 }
 
+func getIdleMemoryReload() bool {
+	return loadSettings().IdleMemoryReload
+}
+
+func setIdleMemoryReload(enabled bool) bool {
+	s := loadSettings()
+	s.IdleMemoryReload = enabled
+	_ = saveSettings(s)
+	return s.IdleMemoryReload
+}
+
 func saveTheme(theme string) string {
 	if theme != "dark" && theme != "light" && theme != "system" {
 		theme = "dark"
@@ -137,6 +184,13 @@ func getUniqueFilePath(dir, filename string) string {
 	}
 }
 
+// saveDownloadedFile writes an attachment into the configured download folder
+// and returns the path it landed on.
+//
+// When that folder cannot be used — it was deleted, it sits on a drive that is
+// no longer mounted, or Windows' Controlled Folder Access refuses the write —
+// the default folder is tried before giving up. Failing outright left the user
+// with "Failed to save file." and no way forward (#68).
 func saveDownloadedFile(filename, dataURI string) (string, error) {
 	settings := loadSettings()
 	dir := settings.DownloadDir
@@ -145,7 +199,35 @@ func saveDownloadedFile(filename, dataURI string) (string, error) {
 	if settings.OrganizeByMonth {
 		dir = filepath.Join(dir, time.Now().Format("2006-01"))
 	}
-	return saveDownloadedFileToDir(dir, filename, dataURI)
+	path, err := saveDownloadedFileToDir(dir, filename, dataURI)
+	if err == nil {
+		recordDownloadIssue("")
+		return path, nil
+	}
+
+	fallback := getDefaultDownloadDir()
+	if settings.OrganizeByMonth {
+		fallback = filepath.Join(fallback, time.Now().Format("2006-01"))
+	}
+	if fallback == dir {
+		// The configured folder already is the default, so there is nowhere
+		// better to try. Report the reason and let the page say so.
+		recordDownloadIssue(err.Error())
+		return "", err
+	}
+
+	path, fallbackErr := saveDownloadedFileToDir(fallback, filename, dataURI)
+	if fallbackErr != nil {
+		recordDownloadIssue(err.Error())
+		return "", err
+	}
+	// The file is on disk, just not where it was asked to go. That is a notice
+	// rather than a failure, but it must still be visible: silently writing to
+	// a different folder than the one the user chose would be worse than the
+	// original failure.
+	recordDownloadIssue(fmt.Sprintf("saved to %s because %s could not be used (%v)",
+		fallback, settings.DownloadDir, err))
+	return path, nil
 }
 
 // setOrganizeByMonth persists the monthly-organization preference and returns
@@ -378,6 +460,77 @@ func isAllowedOpenPath(filePath string) bool {
 // case memory use survivable on a desktop.
 var maxAttachmentBytes int64 = 1 << 30
 
+// windowsReservedNames are the device names Windows refuses to create as
+// ordinary files. The check is on the stem, so "CON.txt" is caught too.
+var windowsReservedNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
+// sanitizeDownloadFilename turns a chat attachment name into one the host
+// filesystem will actually accept.
+//
+// The name comes from the chat, so it is attacker-controlled, and it used to
+// reach os.OpenFile with nothing removed but the path separators. Windows
+// rejects < > : " | ? * outright with ERROR_INVALID_NAME, so an attachment such
+// as "Rapat 12:30.pdf" could never be saved there — the save failed, the toast
+// said only "Failed to save file.", and nothing recorded why (#68). A name
+// ending in a dot or space is silently renamed by Windows, and the reserved
+// device names cannot be created at all.
+//
+// The rules are applied on every platform rather than only on Windows, so the
+// same chat attachment is saved under the same name wherever the app runs.
+func sanitizeDownloadFilename(filename string) string {
+	illegal := func(r rune) rune {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			return '_'
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}
+
+	// Split the extension off first: the trailing-dot/space trim must not eat
+	// it, and the reserved-name check applies to the stem. The extension is
+	// trimmed too — filepath.Ext("laporan..") is "." , and re-appending that
+	// would hand Windows back the trailing dot it silently strips.
+	ext := strings.Map(illegal, filepath.Ext(filename))
+	ext = strings.TrimRight(ext, ". ")
+	stem := strings.Map(illegal, strings.TrimSuffix(filename, filepath.Ext(filename)))
+	stem = strings.TrimRight(stem, ". ")
+	if stem == "" {
+		stem = "download"
+	}
+	if windowsReservedNames[strings.ToUpper(stem)] {
+		stem = "_" + stem
+	}
+
+	// A single path component is capped at 255 UTF-16 units on NTFS. Leave room
+	// for the " (12)" a duplicate save would append, and keep the extension so
+	// the file still opens in the right application.
+	const maxNameRunes = 200
+	stemRunes := []rune(stem)
+	extRunes := []rune(ext)
+	if room := maxNameRunes - len(extRunes); room < 1 {
+		stemRunes = nil
+	} else if len(stemRunes) > room {
+		stemRunes = stemRunes[:room]
+	}
+	name := string(stemRunes) + ext
+	if rs := []rune(name); len(rs) > maxNameRunes {
+		name = string(rs[:maxNameRunes])
+	}
+	if name == "" {
+		name = "download"
+	}
+	return name
+}
+
 func saveDownloadedFileToDir(targetDir, filename, dataURI string) (string, error) {
 	// Validate before MkdirAll so a hostile settings.json can never cause a
 	// sensitive directory (e.g. ~/.config/autostart) to be created/populated.
@@ -388,11 +541,9 @@ func saveDownloadedFileToDir(targetDir, filename, dataURI string) (string, error
 		return "", fmt.Errorf("failed to create target directory: %w", err)
 	}
 
-	// Sanitize filename against directory traversal
-	filename = filepath.Base(filepath.Clean(filename))
-	if filename == "." || filename == "/" || filename == "" {
-		filename = "download"
-	}
+	// The name is chat-controlled: strip any path the sender embedded, then
+	// make it a name the host filesystem will accept.
+	filename = sanitizeDownloadFilename(filepath.Base(filepath.Clean(filename)))
 
 	// Reject oversized payloads BEFORE decoding: base64 expands ~4/3, so
 	// checking the encoded length avoids the transient 2x memory spike of a

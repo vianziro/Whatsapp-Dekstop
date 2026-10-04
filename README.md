@@ -32,7 +32,7 @@ Get the latest stable release for your operating system (updated automatically):
 > [!TIP]
 > Download links point automatically to the latest release assets. You can also view all past versions and architectures on the [Releases](https://github.com/vianziro/Whatsapp-Dekstop/releases) page.
 >
-> **Linux note:** the 1.6.2 pipeline builds macOS and Windows only. Linux packages keep
+> **Linux note:** the 1.6.3 pipeline builds macOS and Windows only. Linux packages keep
 > riding with [v1.5.9.9](https://github.com/vianziro/Whatsapp-Dekstop/releases/tag/v1.5.9.9)
 > until the next Linux build; their fixed links above always resolve.
 
@@ -41,7 +41,8 @@ Get the latest stable release for your operating system (updated automatically):
 ## Key Features
 
 * **Two Accounts, One Window:** Link a second WhatsApp account with a fully isolated browser profile and switch from the account dock (`Ctrl+Shift+1/2` / `Cmd+Shift+1/2`) — with per-account unread badges and a seamless, blink-free swap. One live engine at a time keeps memory low.
-* **Ultra-Lightweight Engine:** Built directly on native OS webviews (WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux). Minimal RAM and battery footprint compared to Chromium/Electron apps.
+* **Ultra-Lightweight Engine:** Built directly on native OS webviews (WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux) instead of bundling a whole browser, so the app's own process stays around 100 MB.
+* **Frees Memory While Hidden (macOS):** WhatsApp Web keeps every image and video it has displayed alive in the renderer, which reaches a couple of gigabytes over a long session. Once the window has been off screen for 15 minutes the page reloads and that memory comes back — only while hidden, at most every 30 minutes, and never during an upload or an open preview. Toggle it under Settings → Maintenance.
 * **Zero Telemetry & Private by Design:** Communicates straight with `https://web.whatsapp.com`. No analytics tracking, no user profiling, and no proxy or relay servers.
 * **Instant Privacy Mode & Auto-Lock:** Quickly redact chat previews, sender names, and media thumbnails with a shortcut (`Ctrl+Shift+P` / `Cmd+Shift+P`) or automatic lock on idle.
 * **Built-in Document & Office Preview:** Instant in-app previews for PDFs, Word docs, Excel spreadsheets, PowerPoint slides, and text attachments without cluttering your drive with duplicate files.
@@ -118,6 +119,29 @@ sudo dnf install ./WhatsApp-Desk-Fedora-x64.rpm
 > variant) and `ldd dist_linux/whatsapp-desk | grep webkit` for the portable archive.
 > RPM packages and arm64 Linux builds are not currently published; build them with
 > `bash build_linux.sh` (see [Building & Releasing](#building--releasing)).
+
+#### Blank window on older Intel graphics
+
+If the window opens but stays blank — the sign-in screen never appears, or the QR code
+appears and then the page goes empty — WebKitGTK's DMABUF renderer is the usual cause. It
+fails on older Intel integrated graphics (Broadwell and earlier, the Gen-8 "BSW" chips
+included) and leaves the page unpainted. Disable it:
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=1 whatsapp-desk
+```
+
+To make it permanent for a desktop launch, add the variable to the `Exec` line of
+`~/.local/share/applications/whatsapp-desk.desktop` (or the system-wide copy under
+`/usr/share/applications/`):
+
+```
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 /usr/bin/whatsapp-desk %U
+```
+
+Rendering falls back to a software-composited path, which is slower but paints correctly.
+Related: [#63](https://github.com/vianziro/Whatsapp-Dekstop/issues/63),
+[#9](https://github.com/vianziro/Whatsapp-Dekstop/issues/9).
 
 ### Verifying Release Integrity
 

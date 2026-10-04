@@ -52,6 +52,36 @@ The maintainers may:
 Please do not publicly disclose the vulnerability before coordinating with the
 maintainers.
 
+## Antivirus False Positives
+
+Windows Defender and other engines occasionally flag the Windows installer as
+`Trojan:Win32/Wacatac.B!ml` or similar. These are **false positives**. The
+releases are unsigned community builds, and the bundled Go and WebView2 binaries
+trip heuristic detection that has nothing to do with the application code. The
+`!ml` suffix marks a machine-learning guess rather than a signature match, which
+is why the same file is reported by one engine and not another.
+
+Before treating a detection as real:
+
+1. **Verify the download.** Compare the file's SHA-256 against the `SHA256SUMS`
+   asset published with the same release:
+
+   ```
+   certutil -hashfile WhatsApp-Desk-Windows-x64-Setup.exe SHA256
+   ```
+
+   A mismatch is a genuine problem — do not run the file. A match means you have
+   the exact bytes the project published.
+2. **Build it yourself** if you would rather not trust the binary:
+   `./build_windows.sh` produces the same installer from source.
+3. **Report the false positive to your vendor.** Microsoft accepts submissions at
+   <https://www.microsoft.com/en-us/wdsi/filesubmission> and usually clears them
+   within a day. Doing this is what stops the next person from hitting it.
+
+Every detection reported so far has been cleared as a false positive. No release
+has ever contained code that contacts anything beyond `https://web.whatsapp.com`
+for chat traffic and this repository's own GitHub releases for updates.
+
 ## Scope
 
 This policy covers security issues in the WhatsApp Desktop application and its

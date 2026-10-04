@@ -859,6 +859,10 @@ func runApp() {
 			return path
 		})
 
+		// Why the last save did not go exactly as asked: the error, or a note
+		// that the file went to the default folder instead (#68).
+		_ = w.Bind("getLastDownloadIssueNative", getLastDownloadIssue)
+
 		_ = w.Bind("previewDocumentNative", func(filename, dataURI string) string {
 			path, err := previewDocument(filename, dataURI)
 			if err != nil {

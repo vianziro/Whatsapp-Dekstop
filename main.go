@@ -1742,6 +1742,48 @@ func getInitScript(ua string) string {
 			});
 		});
 
+		// Idle Memory Reload: the renderer holds every media item the page has
+		// decoded, so a long session ends up with gigabytes that only a page load
+		// hands back (a memory-cache purge reclaims roughly 6%). The native side
+		// reloads while the window is off screen and asks here first, because only
+		// the page knows whether a reload would interrupt something the user
+		// started.
+		waRunModule('idle-reload', function() {
+			// Everything that means "the page is busy with the user's data". A
+			// reload through any of these would throw that work away.
+			var IDLE_RELOAD_BUSY_SELECTOR = '[role="progressbar"], [aria-busy="true"], progress, ' +
+				'[data-testid*="progress" i], [data-testid="document-preview"], ' +
+				'[data-animate-modal-popup="true"]';
+
+			// Returns "" when a reload is safe, or a short reason why it is not.
+			// The reason exists because a bare false is unactionable: the native
+			// log could only say "the page refused", which is true of a dozen
+			// different situations, and a report of "the memory never came back"
+			// could not be told apart from "the app was still loading". Only the
+			// page knows which condition tripped, so it has to be the one to say.
+			function idleReloadRefusalReason() {
+				try {
+					// Belt and braces: the native side already checked, but the page
+					// must never be the one that decides it is safe to reload while
+					// the user is looking at it.
+					if (!document.hidden) return 'the window is not hidden';
+					if (navigator.onLine === false) return 'the browser reports offline';
+					if (isRecentUpload()) return 'an upload started recently';
+					if (document.querySelector(IDLE_RELOAD_BUSY_SELECTOR)) return 'a progress indicator or open dialog is on screen';
+					// A page that has not finished loading, or that is sitting on the
+					// linking screen, has nothing worth reclaiming.
+					if (!document.getElementById('pane-side')) return 'the chat list is not loaded (still starting up, or not signed in)';
+					return '';
+				} catch (e) {
+					return 'the check threw: ' + e;
+				}
+			}
+			window.waIdleReloadRefusalReason = idleReloadRefusalReason;
+			window.waIdleReloadAllowed = function() {
+				return idleReloadRefusalReason() === '';
+			};
+		});
+
 		// Debounced window resize persistence
 		waRunModule('window-resize', function() {
 			var resizeTimer = null;
@@ -3888,16 +3930,26 @@ func getInitScript(ua string) string {
 										var alreadySaved = savedDownloadPaths[savedPath] === true;
 										savedDownloadPaths[savedPath] = true;
 										markDownloadComplete(requestKey, savedPath);
+										// Non-empty only when the configured folder could not be
+										// used and the file went to the default one instead.
+										// Saying nothing would hide where the file actually is.
+										var relocated = window.getLastDownloadIssueNative ? window.getLastDownloadIssueNative() : '';
 										if (shouldAutoOpen) {
 											showInAppDocModal(filename, ownedBlobUrl || href, savedPath, base64data, ownedBlobUrl);
 											if (window.dismissStuckViewer) window.dismissStuckViewer();
-											showFloatingToast(alreadySaved ? ('📄 Already saved: ' + filename) : ('📄 Preview opened: ' + filename), openFolderAction());
+											showFloatingToast(relocated ? ('📄 Preview opened, saved to the default folder: ' + filename)
+												: (alreadySaved ? ('📄 Already saved: ' + filename) : ('📄 Preview opened: ' + filename)), openFolderAction());
 										} else {
-											showFloatingToast(alreadySaved ? ('💾 File already saved: ' + filename) : ('💾 Saved successfully: ' + filename), openFolderAction());
+											showFloatingToast(relocated ? ('💾 Saved to the default folder: ' + filename)
+												: (alreadySaved ? ('💾 File already saved: ' + filename) : ('💾 Saved successfully: ' + filename)), openFolderAction());
 										}
 									} else {
 										if (ownedBlobUrl) URL.revokeObjectURL(ownedBlobUrl);
-										showFloatingToast('❌ Failed to save file.');
+										// The native side knows why it refused. Reporting the bare
+										// failure is what made #68 impossible to act on.
+										var reason = window.getLastDownloadIssueNative ? window.getLastDownloadIssueNative() : '';
+										waDiag('download', 'save failed for ' + filename + (reason ? (': ' + reason) : ' (no reason reported)'));
+										showFloatingToast('❌ Failed to save file.' + (reason ? (' — ' + reason) : ''));
 										releaseDownloadRequest(requestKey);
 									}
 								}).catch(function() {
@@ -4793,7 +4845,13 @@ func getInitScript(ua string) string {
 					'  <button id="wa-btn-reload-modal" class="wa-card-btn" style="padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;text-align:center;">Reload chat</button>' +
 					'  <button id="wa-btn-hardref-modal" class="wa-card-btn" style="padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;text-align:center;">Clear cache</button>' +
 					'  <button id="wa-btn-onboard-modal" class="wa-card-btn" style="padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:500;cursor:pointer;border-width:1px;border-style:solid;text-align:center;">View welcome guide</button>' +
-					'</div>';
+					'</div>' +
+					// macOS only: the watcher that performs the reload is native.
+					(typeof window.getIdleMemoryReloadNative === 'function' ?
+						'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">' +
+						'  <input type="checkbox" id="wa-idle-memory-reload" style="width:14px;height:14px;accent-color:#00a884;cursor:pointer;margin:0;" />' +
+						'  <span class="wa-text-muted" style="font-size:11px;">Free memory while the window is hidden (reloads the page after 15 minutes off screen)</span>' +
+						'</label>' : '');
 				modal.appendChild(actionsSection);
 
 				// Section 4: Help & local diagnostics. This intentionally performs no
@@ -5082,6 +5140,16 @@ func getInitScript(ua string) string {
 						showFloatingToast(avatarBox.checked ?
 							'🙈 Profile photos: blurred (hover to peek)' :
 							'🙉 Profile photos: visible');
+					};
+				}
+				var idleReloadBox = document.getElementById('wa-idle-memory-reload');
+				if (idleReloadBox) {
+					idleReloadBox.checked = !!(window.getIdleMemoryReloadNative && window.getIdleMemoryReloadNative());
+					idleReloadBox.onchange = function() {
+						if (window.setIdleMemoryReloadNative) window.setIdleMemoryReloadNative(idleReloadBox.checked);
+						showFloatingToast(idleReloadBox.checked ?
+							'🧠 Free memory while hidden: on' :
+							'🧠 Free memory while hidden: off');
 					};
 				}
 				document.getElementById('wa-action-toggle-pin').onclick = function() {
