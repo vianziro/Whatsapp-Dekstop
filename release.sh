@@ -179,7 +179,7 @@ PREV_TAG="$(git tag --sort=v:refname | awk -v t="v$VERSION" '
 
 | Platform | Installer | Portable / Archive |
 | :--- | :--- | :--- |
-| macOS 11.0+ (Apple Silicon & Intel) | `WhatsApp-Desk-macOS-Universal.dmg` | `WhatsApp-Desk-macOS-Universal.zip` |
+| macOS 12.0+ (Apple Silicon & Intel) | `WhatsApp-Desk-macOS-Universal.dmg` | `WhatsApp-Desk-macOS-Universal.zip` |
 | Windows 10/11 x64 (WebView2 runtime) | `WhatsApp-Desk-Windows-x64-Setup.exe` | `WhatsAppDesk.exe` or `WhatsApp-Desk-Windows-x64.zip` |
 
 Every published binary is covered by `SHA256SUMS`:
