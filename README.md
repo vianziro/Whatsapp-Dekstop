@@ -47,6 +47,7 @@ Get the latest stable release for your operating system (updated automatically):
 * **Instant Privacy Mode & Auto-Lock:** Quickly redact chat previews, sender names, and media thumbnails with a shortcut (`Ctrl+Shift+P` / `Cmd+Shift+P`) or automatic lock on idle.
 * **Built-in Document & Office Preview:** Instant in-app previews for PDFs, Word docs, Excel spreadsheets, PowerPoint slides, and text attachments without cluttering your drive with duplicate files.
 * **Windows Setup Wizard:** Per-user installer with branded artwork, Start Menu and desktop shortcuts, and clean uninstallation in Windows Apps & Features.
+* **Keeps Running in the Tray (Windows):** Closing the window hides it instead of quitting, so messages and notifications keep arriving; right-click the tray icon to reopen or quit. macOS and Linux already kept a status-bar item.
 * **Unified Settings & Module Guard:** Single accessible settings control (`Ctrl+,` / `Cmd+,`) protected by runtime module isolation (`waRunModule`) against unexpected DOM changes.
 * **Built-in Self Updater:** Automatic update notifications with cryptographic `SHA256SUMS` validation before applying updates.
 * **Per-Monitor Window Memory:** Automatically remembers window position and dimension across multi-monitor setups.

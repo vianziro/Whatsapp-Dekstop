@@ -19,10 +19,49 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ## [1.6.4] - 2026-10-11
 
-> Session, Startup and Document Preview Fixes
+> Session, Startup, Preview and Windows Tray Fixes
+
+### Added
+
+- Windows has a tray icon. macOS has had a status-bar item and Linux a StatusNotifierItem, so
+  Windows was the one platform where closing the window ended the process and its notifications
+  with it — the platform where a chat client is most expected to keep running. The close button now
+  hides the window instead of quitting, a right-click on the tray offers Show, Hide and Quit, and a
+  one-off notification says the app is still running so the window does not simply seem to have
+  vanished. The tray is created on a message-only window of its own, so it does not depend on the
+  browser window or on the vendored library's window procedure. It is deliberately fail-open: if
+  the tray cannot be created the window is left completely alone and the close button quits exactly
+  as before.
+- Every push to `main` and every pull request is now built and tested by CI. It checks formatting,
+  runs `go vet` on Linux — which also compiles `app_linux.go`, a file no local build can reach —
+  cross-builds and vets the Windows target, and runs the test suite. The release workflow stays
+  manual on purpose, for the reason documented in its own header.
+
+### Changed
+
+- The account rail no longer offers the add-account control once both accounts are present. With
+  the cap at two, the control could never be used, and a permanently greyed-out button reads as a
+  broken control rather than as a limit. It still appears while a slot is free, and returns as soon
+  as one is released.
 
 ### Fixed
 
+- The updater no longer offers an update whose download does not exist. The version check learns
+  the latest version from the release page redirect, and the download URL was then built from a
+  naming convention and never checked against the release itself — so on a platform with no
+  published build the user was shown an update and sent to a link that answered HTTP 404 the
+  moment they clicked it. The asset is now confirmed before it is advertised, and a release with no
+  build for this platform says so instead of being presented as "up to date". Only a definite
+  not-found counts: a timeout or a server error stays inconclusive, so a real update is never
+  hidden.
+- The diagnostic log is bounded. It was opened for append with no size cap, so it grew without
+  limit on exactly the machines that were being asked to send it in a bug report. It now rotates
+  past 2 MB, keeping one previous generation.
+- The memory figure in the diagnostic log is real. It reported the heap the Go runtime had
+  reserved rather than the memory the operating system had given the process, and it replaced the
+  accurate reading on macOS and Windows, so every measurement in the log was wrong by an order of
+  magnitude. It is now read from the operating system on each platform, and the log names where the
+  number came from so a wrong figure is visible rather than plausible.
 - The WhatsApp session can no longer be lost to the disk-cache trim on macOS. The 512 MB budget
   measured the whole `~/Library/WebKit/com.whatsapp.desk` tree, which is the session — cookies,
   localStorage and IndexedDB — so the cap tripped on ordinary session growth rather than on cache
