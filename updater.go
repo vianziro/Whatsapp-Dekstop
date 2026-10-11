@@ -57,6 +57,11 @@ type UpdateInfo struct {
 	// down, GitHub unreachable). The UI must then say "check failed" instead
 	// of the misleading "up to date".
 	CheckError string `json:"check_error,omitempty"`
+	// NoAssetForPlatform is set when a newer release exists but carries no
+	// build for this platform. The UI must say so rather than "up to date",
+	// and must never be handed a download URL in that case: the URL is built
+	// from a naming convention, so it is not evidence that the asset exists.
+	NoAssetForPlatform bool `json:"no_asset_for_platform,omitempty"`
 }
 
 func parseVersionParts(v string) []int {
@@ -372,6 +377,22 @@ func checkForUpdate(currentVer string) (*UpdateInfo, error) {
 			if assetURL == "" {
 				return info, fmt.Errorf("no compatible %s update asset configured", runtime.GOOS)
 			}
+			// The redirect only told us the version. Confirm the asset is
+			// really published before advertising it, or the user is sent to a
+			// dead link and only finds out after clicking.
+			if updateAssetMissing(assetURL) {
+				cacheDebugLog("update-check: %s is newer but %s is missing; not offering it",
+					latestVer, assetURL)
+				info.NoAssetForPlatform = true
+				// The release may still carry a differently named asset, which
+				// only the API listing reveals. A failed or rate-limited API
+				// call changes nothing: the conventional name is already known
+				// to be absent.
+				if apiInfo, _ := checkForUpdateViaAPI(currentVer); apiInfo != nil && apiInfo.Available {
+					return apiInfo, nil
+				}
+				return info, nil
+			}
 			info.Available = true
 			info.DownloadURL = assetURL
 		}
@@ -427,6 +448,50 @@ func fetchLatestVersionViaRedirect() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unexpected redirect target %q", loc)
+}
+
+// updateAssetMissing reports whether a release asset URL is definitively not
+// there. The updater's primary path learns only the version number from the
+// releases/latest redirect, so the download URL it builds comes from a naming
+// convention rather than from the release itself. Linux shipped five releases
+// carrying no Linux assets at all, and the updater advertised a download that
+// answered HTTP 404 the moment the user clicked it.
+//
+// Only a definitive "not found" counts. A transport error, a timeout or an
+// unexpected status is inconclusive and reported as present, so an asset that
+// cannot be checked is still offered exactly as before — the fix can only
+// remove offers that were certainly broken.
+func updateAssetMissing(rawURL string) bool {
+	if !isAllowedUpdateURL(rawURL) {
+		return true
+	}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "WhatsAppDesk-Updater")
+	// Ask for a single byte: enough to make GitHub resolve the redirect and
+	// answer, without pulling a multi-megabyte installer just to learn that it
+	// exists.
+	req.Header.Set("Range", "bytes=0-0")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	return updateAssetMissingStatus(resp.StatusCode)
+}
+
+// updateAssetMissingStatus reports whether an HTTP status means the asset is
+// definitively absent. Anything else — a success, a redirect that ended
+// somewhere unexpected, a server error, a timeout — is inconclusive and must
+// not be read as "there is no build for you".
+func updateAssetMissingStatus(code int) bool {
+	return code == http.StatusNotFound || code == http.StatusGone
 }
 
 func checkForUpdateViaAPI(currentVer string) (*UpdateInfo, error) {

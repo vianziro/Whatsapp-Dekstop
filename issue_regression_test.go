@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -341,4 +343,120 @@ func TestAddAccountControlHiddenAtTheAccountCap(t *testing.T) {
 	if strings.Contains(src, "opacity:' + (atMax ? '.45' : '1')") {
 		t.Error("the faded treatment returned; the control should be absent at the cap, not dimmed")
 	}
+}
+
+// --- updater: never advertise a download that is not there ------------------
+
+// TestCheckForUpdateConfirmsTheAssetBeforeOfferingIt guards the report that the
+// app offered an update whose download URL answered HTTP 404. The primary path
+// learns only the version from the release redirect, so the URL it builds is a
+// naming convention rather than a fact. It has to be confirmed before the user
+// is handed it, and a confirmed-missing asset has to be reported as such
+// instead of silently becoming "up to date".
+func TestCheckForUpdateConfirmsTheAssetBeforeOfferingIt(t *testing.T) {
+	src := readProjectFile(t, "updater.go")
+
+	probe := strings.Index(src, "if updateAssetMissing(assetURL) {")
+	if probe < 0 {
+		t.Fatal("checkForUpdate no longer confirms the asset exists, so it can offer a download that 404s")
+	}
+	offer := strings.Index(src, "info.DownloadURL = assetURL")
+	if offer < 0 {
+		t.Fatal("the primary update path no longer sets a download URL; the redirect path is dead")
+	}
+	if probe > offer {
+		t.Fatal("the asset is advertised before it is confirmed, so a missing build is still offered")
+	}
+	if !strings.Contains(src, "info.NoAssetForPlatform = true") {
+		t.Error("a missing asset is not reported to the UI, so the user is told they are up to date while a newer release exists")
+	}
+
+	// The UI has to be able to tell "no build for you" apart from "up to date",
+	// otherwise the new field changes nothing the user can see.
+	ui := readProjectFile(t, "main.go")
+	if !strings.Contains(ui, "res.no_asset_for_platform") {
+		t.Error("the UI never reads no_asset_for_platform, so a release with no build for this platform still reads as up to date")
+	}
+}
+
+// --- diagnostics: a bounded log and an honest RSS figure -------------------
+
+// TestDebugLogRotatesWhenItGrows pins the fix for a log that grew without limit.
+// Users are asked to send wa_debug.log when they report a bug, so it grows
+// exactly on the machines that most need it small, and it was opened for append
+// with no cap at all.
+func TestDebugLogRotatesWhenItGrows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wa_debug.log")
+
+	// A log that is still small must be left alone: rotating it would throw away
+	// the very session being diagnosed.
+	small := []byte("small log\n")
+	if err := os.WriteFile(path, small, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rotateDebugLog(path)
+	if _, err := os.Stat(path + ".1"); err == nil {
+		t.Error("a small log was rotated away, losing the session under diagnosis")
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, small) {
+		t.Error("a small log was modified")
+	}
+
+	// A log over the cap must move aside, and the previous generation must be
+	// replaced rather than accumulated.
+	big := bytes.Repeat([]byte("x"), debugLogMaxBytes+1)
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".1", []byte("previous generation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rotateDebugLog(path)
+
+	if _, err := os.Stat(path); err == nil {
+		t.Error("the oversized log is still in place, so the next open appends to a file already over the cap")
+	}
+	got, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("the oversized log was not kept as the previous generation: %v", err)
+	}
+	if !bytes.Equal(got, big) {
+		t.Error("the rotated log does not hold the file that was just rotated out")
+	}
+}
+
+// TestProcessRSSDoesNotComeFromTheGoHeap pins the fix for a diagnostic that
+// reported the wrong number. The rss= figure was the heap Go's runtime had
+// reserved rather than the memory the OS had given the process, so every
+// measurement in the log was wrong by an order of magnitude — which is why the
+// renderer's real growth had to be measured by hand instead of read from the
+// log the app already writes.
+func TestProcessRSSDoesNotComeFromTheGoHeap(t *testing.T) {
+	// Comments are stripped before scanning: the doc comments name the old
+	// mistake, and a guard its own explanation can trip is worse than none.
+	src := stripCommentLines(readProjectFile(t, "debuglog.go"))
+	if strings.Contains(src, "MemStats") {
+		t.Error("the diagnostics log is reporting Go's reserved heap again instead of the process's resident size")
+	}
+	if !strings.Contains(src, "readProcessRSSKB()") {
+		t.Error("the resident size is not read from the operating system")
+	}
+	if !strings.Contains(src, `cacheDebugLog("stats phase=%s rss=%s source=%s`) {
+		t.Error("the stats line does not name where the number came from, so a wrong figure cannot be spotted in the log")
+	}
+
+	// The reader itself must work on the platform being diagnosed, or the log
+	// stays silent about memory exactly where it matters.
+	kb, source, ok := readProcessRSSKB()
+	if !ok {
+		t.Skipf("no OS resident-size source here (%s); the log will report unavailable", source)
+	}
+	if source == "unavailable" {
+		t.Error("a successful read reported the unavailable source")
+	}
+	if kb < 512 {
+		t.Errorf("resident size %dKB is implausibly small; it looks like a page count or a zero rather than kilobytes", kb)
+	}
+	t.Logf("resident size: %dMB (source %s)", kb/1024, source)
 }

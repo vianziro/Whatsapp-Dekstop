@@ -353,6 +353,49 @@ func TestCheckForUpdateLive(t *testing.T) {
 	}
 }
 
+// TestUpdateAssetMissingStatus pins which HTTP answers may be read as "this
+// release has no build for you". Only a definitive not-found counts: a
+// rate-limited 403, a 5xx or a redirect are all inconclusive, and treating them
+// as missing would silently hide real updates.
+func TestUpdateAssetMissingStatus(t *testing.T) {
+	cases := []struct {
+		code int
+		want bool
+	}{
+		{http.StatusOK, false},
+		{http.StatusPartialContent, false}, // the ranged request succeeded
+		{http.StatusMovedPermanently, false},
+		{http.StatusForbidden, false}, // rate limit, not absence
+		{http.StatusInternalServerError, false},
+		{http.StatusBadGateway, false},
+		{http.StatusNotFound, true},
+		{http.StatusGone, true},
+	}
+	for _, c := range cases {
+		if got := updateAssetMissingStatus(c.code); got != c.want {
+			t.Errorf("updateAssetMissingStatus(%d) = %v; want %v", c.code, got, c.want)
+		}
+	}
+}
+
+// TestUpdateAssetMissingAgainstLiveRelease checks the probe against the real
+// repository: an asset that exists must not be reported missing (or every
+// update would be suppressed), and a name that does not exist must be. Skips
+// without network access.
+func TestUpdateAssetMissingAgainstLiveRelease(t *testing.T) {
+	known := updateAssetForPlatform(runtime.GOOS, runtime.GOARCH)
+	if known == "" {
+		t.Skip("no update asset configured for this platform")
+	}
+	if updateAssetMissing(known) {
+		t.Skipf("skipping live network test: could not confirm %s exists", known)
+	}
+	missing := "https://github.com/" + githubRepo + "/releases/latest/download/definitely-not-a-real-asset-zzz.zip"
+	if !updateAssetMissing(missing) {
+		t.Error("a missing asset was reported as present, so the updater would still offer a download that 404s")
+	}
+}
+
 func TestDownloadEnforcesSizeLimit(t *testing.T) {
 	prev := maxUpdateDownloadBytes
 	maxUpdateDownloadBytes = 64 << 10

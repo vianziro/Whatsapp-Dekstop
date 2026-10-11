@@ -3123,6 +3123,8 @@ func getInitScript(ua string) string {
 					return window.checkForUpdateNative(true).then(function(res) {
 						if (res && res.available) {
 							window.showUpdateBanner(res.latest_version, res.release_title, res.download_url);
+						} else if (res && res.no_asset_for_platform) {
+							showFloatingToast('⬆️ v' + res.latest_version + ' is out, but no build is published for your platform yet.');
 						} else if (res && res.check_error) {
 							showFloatingToast('⚠️ Update check failed: ' + res.check_error);
 						} else {

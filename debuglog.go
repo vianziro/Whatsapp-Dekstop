@@ -21,6 +21,12 @@ var (
 	debugStartedAt = time.Now()
 )
 
+// debugLogMaxBytes caps the diagnostic log. Users are asked to send this file
+// when they report a bug, so it grows exactly on the machines that most need it
+// to stay readable — and it was opened for append with no cap at all. One
+// previous generation is kept beside it.
+const debugLogMaxBytes = 2 << 20 // 2 MiB
+
 // debugMarkerPath is the opt-in file that enables diagnostics without an
 // environment variable. A Finder/Dock launch cannot pass WA_DESK_DEBUG, and
 // asking a user to run the binary from a terminal is a non-starter, so an empty
@@ -90,6 +96,7 @@ func cacheDebugLog(format string, args ...interface{}) {
 	defer debugLogMu.Unlock()
 	if debugLogFile == nil {
 		_ = os.MkdirAll(filepath.Dir(debugLogPath()), 0755)
+		rotateDebugLog(debugLogPath())
 		f, err := os.OpenFile(debugLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
 			return
@@ -101,33 +108,41 @@ func cacheDebugLog(format string, args ...interface{}) {
 		fmt.Sprintf(format, args...))
 }
 
-// debugLogProcessStats writes the current process RSS plus, on darwin, the
-// resident size of the WebKit child processes. Light: one `ps` invocation.
+// rotateDebugLog keeps the diagnostic log bounded: an oversized file is moved
+// aside to "<name>.1", replacing any previous generation, so the next open
+// starts a fresh one. Dropping the older half of a diagnostic session is the
+// point — the alternative was a file that never stopped growing.
+func rotateDebugLog(path string) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() < debugLogMaxBytes {
+		return
+	}
+	_ = os.Remove(path + ".1")
+	_ = os.Rename(path, path+".1")
+}
+
+// debugLogProcessStats writes the process's resident set size plus the goroutine
+// count. The RSS is read from the operating system; see processRSSMB.
 func debugLogProcessStats(phase string) {
 	if !debugEnabled() {
 		return
 	}
-	out, err := os.ReadFile("/proc/self/statm")
-	rss := "n/a"
-	if err == nil && len(out) > 0 {
-		var total, resident uint64
-		if _, err := fmt.Sscanf(string(out), "%d %d", &total, &resident); err == nil {
-			rss = fmt.Sprintf("%dMB", resident*uint64(pageSize())/1024/1024)
-		}
-	}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		rss = fmt.Sprintf("%dMB", approxSelfRSS())
-	}
-	cacheDebugLog("stats phase=%s rss=%s goroutines=%d", phase, rss, runtime.NumGoroutine())
+	rss, source := processRSSMB()
+	cacheDebugLog("stats phase=%s rss=%s source=%s goroutines=%d",
+		phase, rss, source, runtime.NumGoroutine())
 }
 
-func pageSize() int {
-	return 4096
-}
-
-func approxSelfRSS() int64 {
-	// Cheap, portable-enough approximation for diagnostics only.
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return int64(m.Sys / 1024 / 1024)
+// processRSSMB reports this process's resident set size in megabytes as the
+// operating system sees it, and names where the number came from. It does not
+// use Go's runtime statistics: the heap the runtime has reserved is not the
+// memory the OS has given the process, and reporting that made every rss= line
+// in the log wrong by an order of magnitude — which is why the renderer's real
+// growth had to be measured by hand instead of read from the log the app was
+// already writing.
+func processRSSMB() (string, string) {
+	kb, source, ok := readProcessRSSKB()
+	if !ok || kb <= 0 {
+		return "n/a", "unavailable"
+	}
+	return fmt.Sprintf("%dMB", kb/1024), source
 }
