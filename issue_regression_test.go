@@ -23,6 +23,30 @@ func readProjectFile(t *testing.T, name string) string {
 	return string(data)
 }
 
+// stripCommentLines removes whole-line comments so a guard can never be tripped
+// by prose. A comment that merely *mentions* a call site (for example "the code
+// after w.Run() is never reached") must not count as that call site existing, or
+// the assertion fires on a correct build. Trailing comments on code lines are
+// left alone on purpose: cutting from the first "//" would also truncate any
+// line containing a URL.
+//
+// It lives here rather than in a platform-specific test file so every platform's
+// build can reach it; it was darwin-only at first, which broke `GOOS=windows go
+// vet`.
+func stripCommentLines(src string) string {
+	lines := strings.Split(src, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			kept = append(kept, "")
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // --- #63: WebKitGTK DMABUF fallback ---------------------------------------
 
 func TestDMABUFDecision(t *testing.T) {
@@ -459,4 +483,58 @@ func TestProcessRSSDoesNotComeFromTheGoHeap(t *testing.T) {
 		t.Errorf("resident size %dKB is implausibly small; it looks like a page count or a zero rather than kilobytes", kb)
 	}
 	t.Logf("resident size: %dMB (source %s)", kb/1024, source)
+}
+
+// --- Windows tray: fail-open, and never swallow the app's own close --------
+
+// TestWindowsTrayIsFailOpenAndDoesNotSwallowTheAppsOwnClose guards the tray
+// added for Windows, which had none while macOS and Linux both did. This code
+// cannot be exercised by the suite — it only compiles on Windows — so the two
+// properties that make it safe to ship are pinned here instead:
+//
+//  1. if the tray cannot be created the window is left completely alone, so the
+//     worst case is exactly the behaviour that shipped before; and
+//  2. the app's own WM_CLOSE is never intercepted, because that is how runApp
+//     tears its window down to rebuild it on an account switch — swallowing it
+//     would leave the old window alive beside the new one.
+func TestWindowsTrayIsFailOpenAndDoesNotSwallowTheAppsOwnClose(t *testing.T) {
+	tray := stripCommentLines(readProjectFile(t, "tray_windows.go"))
+
+	create := strings.Index(tray, "if !trayCreate() {")
+	if create < 0 {
+		t.Fatal("trayAttach no longer checks whether the tray could be created")
+	}
+	subclass := strings.Index(tray, "traySubclassMainWindow(hwnd)")
+	if subclass < 0 {
+		t.Fatal("the close button is never routed through the tray, so hiding the window has no effect")
+	}
+	if create > subclass {
+		t.Error("the window is subclassed before the tray is known to exist, so a failed tray leaves a window that can be hidden with no way back")
+	}
+
+	// Only the user's close request may be intercepted. WM_CLOSE is the app's
+	// own teardown path.
+	if strings.Contains(tray, "trayWmClose") {
+		t.Error("the tray intercepts WM_CLOSE, which is how the app tears its own window down on an account switch")
+	}
+	if !strings.Contains(tray, "if msg == trayWmSysCommand && wparam&0xfff0 == trayScClose {") {
+		t.Error("the user's close request (WM_SYSCOMMAND/SC_CLOSE) is not intercepted, so the close button still ends the app")
+	}
+
+	// The Win32 callback address is handed to the OS, so the Go value has to
+	// stay reachable or the collector may free it while Windows still calls it.
+	if !strings.Contains(tray, "= syscall.NewCallback(trayWindowProc)") {
+		t.Error("the tray window procedure is not held in a package variable; the collector may free it while Windows still calls it")
+	}
+	if !strings.Contains(tray, "= syscall.NewCallback(trayMainWindowProc)") {
+		t.Error("the subclassed window procedure is not held in a package variable; the collector may free it while Windows still calls it")
+	}
+
+	app := readProjectFile(t, "app_windows.go")
+	if !strings.Contains(app, "trayAttach(hwnd, func() { w.Terminate() }") {
+		t.Error("runApp never attaches the tray, so Windows still has no tray icon")
+	}
+	if !strings.Contains(app, "trayDetach()") {
+		t.Error("the tray icon is never removed on exit, leaving a ghost icon in the notification area")
+	}
 }

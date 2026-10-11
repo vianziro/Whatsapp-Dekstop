@@ -820,6 +820,12 @@ func runApp() {
 		hwnd := uintptr(w.Window())
 		configureWindow(hwnd)
 
+		// Windows had no tray icon, so closing the window ended the process and
+		// its notifications with it. Attach the tray once per session and point
+		// it at each rebuilt window; if it cannot be created, the close button
+		// is left exactly as it was (see tray_windows.go).
+		trayAttach(hwnd, func() { w.Terminate() }, iconFullPath, executablePath)
+
 		w.SetTitle(windowTitle)
 		w.SetSize(450, 320, webview2.HintMin)
 		w.SetSize(windowWidth, windowHeight, webview2.HintNone)
@@ -1141,6 +1147,7 @@ func runApp() {
 		// An ordinary close ends the app. A switch goes round again and rebuilds
 		// the engine on the account that is now active.
 		if !switchRequested {
+			trayDetach()
 			return
 		}
 	}
