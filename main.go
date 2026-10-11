@@ -3552,17 +3552,24 @@ func getInitScript(ua string) string {
 
 				dock.appendChild(scroll);
 
-				var atMax = accounts.length >= maxAccountsUI;
-				var add = document.createElement('button');
-				add.type = 'button';
-				add.disabled = switchingId !== null || atMax;
-				add.setAttribute('aria-label', atMax ? 'Maximum of ' + maxAccountsUI + ' accounts reached' : 'Add account');
-				add.title = atMax ? 'Maximum of ' + maxAccountsUI + ' accounts reached' : 'Add account';
-				add.textContent = '+';
-				var addColor = isDarkMode() ? '#8696a0' : '#667781';
-				add.style.cssText = 'margin-top:10px;width:38px;height:38px;padding:0;border-radius:50%;border:1px dashed ' + addColor + ';background:transparent;color:' + addColor + ';font-size:22px;font-weight:300;line-height:1;cursor:' + (add.disabled ? 'default' : 'pointer') + ';outline:none;opacity:' + (atMax ? '.45' : '1') + ';flex:none;';
-				add.onclick = createAccount;
-				dock.appendChild(add);
+				// The rail offers the add control only while a slot is free. With
+				// the cap at two accounts, a permanently greyed-out control once
+				// both chips are on screen reads as a broken button rather than a
+				// limit, so it is left out of the dock entirely at the cap.
+				// renderDock runs again after every account change, so the control
+				// returns the moment a slot frees up.
+				if (accounts.length < maxAccountsUI) {
+					var add = document.createElement('button');
+					add.type = 'button';
+					add.disabled = switchingId !== null;
+					add.setAttribute('aria-label', 'Add account');
+					add.title = 'Add account';
+					add.textContent = '+';
+					var addColor = isDarkMode() ? '#8696a0' : '#667781';
+					add.style.cssText = 'margin-top:10px;width:38px;height:38px;padding:0;border-radius:50%;border:1px dashed ' + addColor + ';background:transparent;color:' + addColor + ';font-size:22px;font-weight:300;line-height:1;cursor:' + (add.disabled ? 'default' : 'pointer') + ';outline:none;flex:none;';
+					add.onclick = createAccount;
+					dock.appendChild(add);
+				}
 
 				// Partitioned dock: accounts (+ add) above, support-feature icons
 				// pinned below the divider. The scroll area flexes, so tools stay

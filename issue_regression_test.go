@@ -309,3 +309,36 @@ func TestWindowsSwitchKeepsTheWindowInPlace(t *testing.T) {
 		t.Error("the delayed teardown is not scheduled, so the veil delay has no effect")
 	}
 }
+
+// --- account rail: no dead add control once the cap is reached -------------
+
+// TestAddAccountControlHiddenAtTheAccountCap pins the rail behaviour a user
+// reported: with the cap at two accounts the add control was still rendered,
+// merely greyed out, so it read as a broken button. It must not be rendered at
+// all once both chips are on screen — and it must still exist below the cap, or
+// a single-account user could never add a second one.
+func TestAddAccountControlHiddenAtTheAccountCap(t *testing.T) {
+	src := readProjectFile(t, "main.go")
+
+	guard := "if (accounts.length < maxAccountsUI) {"
+	gi := strings.Index(src, guard)
+	if gi < 0 {
+		t.Fatal("the account rail no longer checks for a free slot before offering the add control")
+	}
+	create := strings.Index(src, "add.textContent = '+'")
+	if create < 0 {
+		t.Fatal("the add control disappeared entirely; a single-account user could never add a second account")
+	}
+	if create < gi {
+		t.Fatal("the add control is created outside the free-slot check, so it still shows at the cap")
+	}
+
+	// The old treatment kept the button and faded it. If that text comes back,
+	// the dead control comes back with it.
+	if strings.Contains(src, "'Maximum of ' + maxAccountsUI + ' accounts reached'") {
+		t.Error("the add control is rendered again at the cap instead of being hidden")
+	}
+	if strings.Contains(src, "opacity:' + (atMax ? '.45' : '1')") {
+		t.Error("the faded treatment returned; the control should be absent at the cap, not dimmed")
+	}
+}
