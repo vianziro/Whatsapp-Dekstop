@@ -32,7 +32,7 @@ Get the latest stable release for your operating system (updated automatically):
 > [!TIP]
 > Download links point automatically to the latest release assets. You can also view all past versions and architectures on the [Releases](https://github.com/vianziro/Whatsapp-Dekstop/releases) page.
 >
-> **Linux note:** the 1.6.3 pipeline builds macOS and Windows only. Linux packages keep
+> **Linux note:** the 1.6.4 pipeline builds macOS and Windows only. Linux packages keep
 > riding with [v1.5.9.9](https://github.com/vianziro/Whatsapp-Dekstop/releases/tag/v1.5.9.9)
 > until the next Linux build; their fixed links above always resolve.
 

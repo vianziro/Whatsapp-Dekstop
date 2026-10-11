@@ -65,8 +65,10 @@ static void configureWebKitMemoryLimits(void) {
 
 // Disk cache budget. WebKit's NetworkCache (the one WKWebView actually uses)
 // grows unbounded on disk; measure it and wipe it when it exceeds the cap.
-// 512 MB total across both cache homes keeps media previews snappy while
-// guaranteeing the profile can never balloon unnoticed for months.
+// 512 MB of HTTP cache keeps media previews snappy while guaranteeing the cache
+// can never balloon unnoticed for months. It bounds the cache only: the session
+// store is never counted here and never deleted, because losing it costs the
+// user a re-pair rather than a re-download.
 static const long long kWhatsAppDeskCacheCapBytes = 512LL * 1024 * 1024;
 
 // enumeratorAtURL (not enumeratorAtPath): the path-based enumerator's
@@ -96,15 +98,65 @@ static long long directorySizeBytes(NSString* path) {
     }
 }
 
+// The exact directories the budget measures and the purge deletes. Only HTTP
+// caches are listed, and both sides derive from this one function so they can
+// never drift apart. Everything else under ~/Library/WebKit/com.whatsapp.desk
+// is session material: cookies, localStorage, IndexedDB, and WebKit's own
+// service-worker registration. Counting that tree towards a "disk cache" budget
+// made the 512 MB cap trip on ordinary session growth, and the purge it
+// triggered then deleted a live SQLite database from under a running engine.
+static NSArray* whatsappDeskDiskCacheDirs(void) {
+    NSMutableArray* dirs = [NSMutableArray array];
+    NSString* webkitCaches = [NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/Caches/com.whatsapp.desk/WebKit"];
+    [dirs addObject:[webkitCaches stringByAppendingPathComponent:@"NetworkCache"]];
+    [dirs addObject:[webkitCaches stringByAppendingPathComponent:@"OfflineWebApplicationCache"]];
+    // A named (per-account) data store keeps its own HTTP cache one level down.
+    // The previous target looked for it directly under the bundle root, where it
+    // has never existed, so that half of every purge was dead code.
+    NSString* storeRoot = [NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/WebKit/com.whatsapp.desk/WebsiteDataStore"];
+    for (NSString* entry in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:storeRoot error:nil]) {
+        [dirs addObject:[[storeRoot stringByAppendingPathComponent:entry]
+            stringByAppendingPathComponent:@"NetworkCache"]];
+    }
+    return dirs;
+}
+
 static long long whatsappDeskDiskCacheBytes(void) {
     @autoreleasepool {
         long long total = 0;
-        NSArray* homes = @[
-            [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/com.whatsapp.desk"],
-            [NSHomeDirectory() stringByAppendingPathComponent:@"Library/WebKit/com.whatsapp.desk"],
-        ];
-        for (NSString* home in homes) total += directorySizeBytes(home);
+        for (NSString* dir in whatsappDeskDiskCacheDirs()) total += directorySizeBytes(dir);
         return total;
+    }
+}
+
+static long long whatsappDeskDiskCacheBytesSync(void) {
+    return whatsappDeskDiskCacheBytes();
+}
+
+// Deletes the HTTP caches. Callers MUST run this with no engine alive: these
+// directories hold WebKit's open NetworkCache index, and the same tree carries
+// the service-worker registration that WebKit rewrites in place. Removing them
+// mid-session is exactly the "deleting the live cache dir risks profile
+// corruption" case the Windows path already refuses to hit, so this is only
+// reached from whatsappDeskPurgeDiskCacheBeforeLaunch.
+static void whatsappDeskPurgeDiskCache(void) {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    for (NSString* dir in whatsappDeskDiskCacheDirs()) {
+        [fm removeItemAtPath:dir error:nil];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+}
+
+// Startup-only trim, called from Go before the first WebView exists. Returns the
+// number of bytes reclaimed so the caller can log it; 0 means "under budget".
+static long long whatsappDeskPurgeDiskCacheBeforeLaunch(void) {
+    @autoreleasepool {
+        long long bytes = whatsappDeskDiskCacheBytes();
+        if (bytes <= kWhatsAppDeskCacheCapBytes) return 0;
+        whatsappDeskPurgeDiskCache();
+        return bytes;
     }
 }
 
@@ -113,28 +165,31 @@ static long long whatsappDeskDiskCacheBytes(void) {
 // must not touch g_mainWebView or any live Objective-C object — if the app is
 // quitting, the WebView is deallocated on the main thread while this block may
 // still run, and messaging the dangling pointer raises an Objective-C
-// exception (abort). Disk cache purge therefore happens via removeItemAtPath
-// on plain paths only; the WebKit-internal purge stays on the calling thread.
+// exception (abort).
+//
+// It measures and reports only. This used to delete, on every minimize and
+// every window close, while the engine still owned the files; the delete now
+// happens once, pre-launch, via whatsappDeskPurgeDiskCacheBeforeLaunch.
 static void enforceDiskCacheCap(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         @autoreleasepool {
             long long bytes = whatsappDeskDiskCacheBytes();
             if (bytes <= kWhatsAppDeskCacheCapBytes) return;
-            // Over budget: drop our on-disk HTTP cache homes. These are plain
-            // directories WebKit recreates as needed; session data (cookies/
-            // localStorage/IndexedDB) lives elsewhere and is never touched.
-            [[NSFileManager defaultManager] removeItemAtPath:
-                [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/com.whatsapp.desk"]
-                                                          error:nil];
-            [[NSFileManager defaultManager] removeItemAtPath:
-                [NSHomeDirectory() stringByAppendingPathComponent:@"Library/WebKit/com.whatsapp.desk/NetworkCache"]
-                                                          error:nil];
+            NSLog(@"[WhatsApp Desk] disk cache %.0f MB over cap; purge deferred to next launch",
+                  (double)bytes / 1024.0 / 1024.0);
         }
     });
 }
 
-static long long whatsappDeskDiskCacheBytesSync(void) {
-    return whatsappDeskDiskCacheBytes();
+// Ends the run loop on the main thread. [NSApp terminate:] is the same path the
+// Quit menu item takes, so WebKit tears its store down in order instead of the
+// process being killed with writes in flight. Note that AppKit exits the
+// process before the code following the run loop runs, so the "run loop
+// returned" line in runApp is not written on this path.
+static void whatsappDeskRequestTerminate(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp terminate:nil];
+    });
 }
 
 static void purgeWebKitMemory(void) {
@@ -1208,6 +1263,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -1327,6 +1383,19 @@ func getAppBundlePath() string {
 	return execPath
 }
 
+// requestAppTerminate asks AppKit to end the run loop, the same way the Quit
+// menu item does. It is the only correct way out for code that is not on the
+// main thread: the C helper hops to the main queue itself.
+//
+// Callers that used to reach for os.Exit must use this instead. os.Exit skips
+// every teardown step, so WebKit is never asked to close its website data store
+// and IndexedDB — where the WhatsApp session lives — can be left with writes in
+// flight. That is one route to the session coming back as "a database error
+// occurred on your browser ... please relink your device" (issue #74).
+func requestAppTerminate() {
+	C.whatsappDeskRequestTerminate()
+}
+
 func getLaunchAgentPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1435,6 +1504,34 @@ func runApp() {
 	}
 
 	userDataDir := getUserDataDir()
+
+	// Trim the HTTP cache before the engine exists. This is the only moment the
+	// delete is safe: once a WebView is up, WebKit holds the NetworkCache index
+	// and the service-worker registration open, so the mid-session check only
+	// reports (see enforceDiskCacheCap in the C block above).
+	if purged := C.whatsappDeskPurgeDiskCacheBeforeLaunch(); purged > 0 {
+		cacheDebugLog("cache startup: purged %.0f MB (>512 MB cap) before the engine started",
+			float64(purged)/1024/1024)
+	}
+
+	// macOS signals a GUI app with SIGTERM on logout, restart and shutdown, and
+	// a force-quit sends SIGKILL. Unhandled, the process simply vanishes: no
+	// "received terminated" line, no crash report, nothing to tell "the app
+	// closed itself" apart from "the system closed it". Log the signal and end
+	// the run loop through AppKit, so WebKit can tear its store down in order
+	// instead of being killed with writes still in flight.
+	//
+	// Measured 2026-10-11: after [NSApp terminate:] the process is gone before
+	// the code following the run loop executes, so the "run loop returned" line
+	// further down is NOT written on this path. The "received terminated;
+	// terminating through AppKit" line above is the marker to look for.
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGTERM, syscall.SIGINT)
+	go guardGoroutine("signal-watch", func() {
+		sig := <-signalCh
+		cacheDebugLog("received %s; terminating through AppKit", sig)
+		C.whatsappDeskRequestTerminate()
+	})
 
 	// Switching accounts never restarts the process: it tears down this sole
 	// WebView, waits for teardown, then loops back to build a fresh one bound

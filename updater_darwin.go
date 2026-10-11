@@ -122,10 +122,21 @@ extract_dir="$3"
 zip_path="$4"
 log_path="$5"
 script_path="$6"
+app_pid="$7"
 backup_path="${old_app}.old.$$"
 trap 'rm -f "$script_path"' EXIT
 {
-  sleep 1
+  # Wait for the app to actually exit before touching its bundle. This used to
+  # be a fixed "sleep 1", which raced the app's own teardown: the bundle could
+  # be moved and replaced while WebKit still had its website data store open,
+  # and a session written through that window comes back as "a database error
+  # occurred on your browser ... please relink your device" (issue #74).
+  # Bounded to ~30 s so a stuck process cannot block the update forever.
+  waited=0
+  while [ "$waited" -lt 300 ] && kill -0 "$app_pid" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
   mv "$old_app" "$backup_path"
   if ! /usr/bin/ditto "$new_app" "$old_app"; then
     rm -rf "$old_app"
@@ -141,13 +152,18 @@ trap 'rm -f "$script_path"' EXIT
 		return fmt.Errorf("failed to prepare update helper: %w", err)
 	}
 
-	cmd := exec.Command("/bin/sh", scriptPath, appBundle, newAppPath, extractDir, zipPath, logPath, scriptPath)
+	cmd := exec.Command("/bin/sh", scriptPath, appBundle, newAppPath, extractDir, zipPath, logPath, scriptPath, fmt.Sprintf("%d", os.Getpid()))
 	if err := cmd.Start(); err != nil {
 		_ = os.Remove(scriptPath)
 		return fmt.Errorf("failed to start restart script: %w", err)
 	}
 
-	os.Exit(0)
+	// Quit through AppKit rather than killing the process outright. An abrupt
+	// exit skips WebKit's teardown, and the helper above now waits for this PID
+	// to disappear, so a clean quit both lets the session store close in order
+	// and tells the helper when it is safe to swap the bundle.
+	cacheDebugLog("update: helper started; requesting a clean quit (pid=%d)", os.Getpid())
+	requestAppTerminate()
 	return nil
 }
 

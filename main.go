@@ -1618,6 +1618,14 @@ func getInitScript(ua string) string {
 						}
 					};
 					reader.readAsDataURL(blob);
+				} else if (blob && isDocBlob) {
+					// The preview was suppressed, and the two reasons look
+					// identical to the user: WhatsApp's own viewer appears and
+					// ours never does (#70). Record which guard won so a report
+					// carries the answer instead of needing another round trip.
+					var skipReason = isRecentUpload() ? 'recent upload' : 'explicit download';
+					waDiag('doc', 'preview skipped for ' + (blob.type || 'unknown type') + ' (' + skipReason + ')');
+					if (window.__waNote) window.__waNote('doc preview', 'suppressed by ' + skipReason);
 				}
 			} catch (e) {}
 			return url;
@@ -2815,8 +2823,17 @@ func getInitScript(ua string) string {
 		// would be an unverified change to every call, and a wrong guess makes
 		// calls worse, not better.
 		waRunModule('capture-diagnostics', function() {
+			// navigator.mediaDevices is not guaranteed to exist at
+			// document-creation time, which is exactly when this script is
+			// injected. The first version read it once and returned silently when
+			// it was missing, so the probe was NEVER installed: the mic: lines
+			// issue #57 asks for had never been written by any build, and every
+			// request for them came back empty. Retry until the API appears
+			// instead of giving up on the first look.
+			function installCaptureProbe() {
 			var md = navigator.mediaDevices;
-			if (!md || typeof md.getUserMedia !== 'function' || md.__waCaptureProbe) return;
+			if (!md || typeof md.getUserMedia !== 'function') return false;
+			if (md.__waCaptureProbe) return true;
 			var original = md.getUserMedia;
 
 			function describeConstraints(c) {
@@ -2879,6 +2896,20 @@ func getInitScript(ua string) string {
 				return result;
 			};
 			md.__waCaptureProbe = true;
+			waDiag('mic', 'capture probe installed');
+			return true;
+			}
+			if (installCaptureProbe()) return;
+			// Bounded retry: 40 x 250 ms is ten seconds, far longer than the
+			// gap between document creation and mediaDevices being exposed, and
+			// it stops on its own so it can never become a permanent timer.
+			var captureProbeAttempts = 0;
+			var captureProbeTimer = setInterval(function() {
+				captureProbeAttempts++;
+				if (installCaptureProbe() || captureProbeAttempts > 40) clearInterval(captureProbeTimer);
+			}, 250);
+			document.addEventListener('DOMContentLoaded', installCaptureProbe);
+			window.addEventListener('load', installCaptureProbe);
 		});
 
 		// Auto-Start at Login Toggle (Cmd/Ctrl + Shift + S)
@@ -3997,11 +4028,21 @@ func getInitScript(ua string) string {
 					.replace(/\s+/g, ' ').trim();
 				return /^(download|unduh)$/i.test(label);
 			}
+			// Records "the user asked to download this, not to preview it".
+			// That marker suppresses the in-app preview, so it must only be set
+			// by a genuine download gesture. A click we forwarded ourselves out
+			// of a document bubble is the opposite — the user opened the
+			// document — and marking it here is exactly how opening a PDF ended
+			// up showing WhatsApp's built-in viewer instead of ours (#70).
+			function markExplicitDownload() {
+				if (forwardingDocumentDownload) return;
+				lastExplicitDownloadAt = Date.now();
+			}
 			document.addEventListener('click', function(e) {
 				var target = e.target;
 				if (target && target.closest &&
 					(target.closest(viewerDownloadSelector) || isExplicitDownloadMenuItem(target))) {
-					lastExplicitDownloadAt = Date.now();
+					markExplicitDownload();
 				}
 			}, true);
 
@@ -4060,7 +4101,7 @@ func getInitScript(ua string) string {
 					var name = resolveDownloadFilename(downloadAttr || this.download || lastClickedDocName || 'whatsapp_media', '');
 					// An explicit download anchor means save only. Opening a document
 					// preview is reserved for clicking the document itself.
-					lastExplicitDownloadAt = Date.now();
+					markExplicitDownload();
 					captureDownload(href, name, false);
 					return;
 				}
@@ -4079,7 +4120,7 @@ func getInitScript(ua string) string {
 							e.stopPropagation();
 							var name = resolveDownloadFilename(downloadAttr || target.download || lastClickedDocName || 'whatsapp_media', '');
 							// The user clicked Download directly: do not open a second preview.
-							lastExplicitDownloadAt = Date.now();
+							markExplicitDownload();
 							captureDownload(href, name, false);
 							return;
 						}

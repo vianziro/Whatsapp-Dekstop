@@ -17,6 +17,62 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ---
 
+## [1.6.4] - 2026-10-11
+
+> Session, Startup and Document Preview Fixes
+
+### Fixed
+
+- The WhatsApp session can no longer be lost to the disk-cache trim on macOS. The 512 MB budget
+  measured the whole `~/Library/WebKit/com.whatsapp.desk` tree, which is the session — cookies,
+  localStorage and IndexedDB — so the cap tripped on ordinary session growth rather than on cache
+  growth. The trim it then fired deleted `~/Library/Caches/com.whatsapp.desk` while the engine was
+  still running, on every window minimise and every close, and that directory is not a pure cache:
+  it holds WebKit's live service-worker registration database. The budget now measures and deletes
+  HTTP caches only, from one shared list so the measured set and the deleted set cannot drift, and
+  the delete happens once, before the engine starts. A target that never existed — the code looked
+  for `NetworkCache` directly under the WebKit root — is fixed, so the trim also works now (#74).
+- macOS handles SIGTERM and SIGINT. The app had no signal handler at all, so a logout, restart or
+  shutdown killed it with writes still in flight and left nothing behind — which is why the
+  symptom was indistinguishable from the app closing itself. Signals are now logged and the run
+  loop ends through AppKit, the same path the Quit menu takes, so WebKit closes its website data
+  store in order (#74).
+- The macOS updater quits cleanly before its bundle is replaced. It exited abruptly, which skips
+  WebKit's teardown, and the helper script that swaps the app waited a fixed one second — long
+  enough to begin replacing the bundle while the session store was still open. The helper now
+  waits for the process to actually disappear, bounded so a stuck process cannot block an update
+  (#74).
+- A missing WebView2 runtime now explains itself instead of crashing on Windows. The engine was
+  created without checking for the runtime, and the vendored library leaves its internal interface
+  pointer nil when the runtime is absent and then dereferences it — a panic that the startup
+  recovery turned into a silent exit with no explanation. The runtime is checked first, and a
+  missing one produces a dialog naming the download instead (#73).
+- Switching accounts keeps the window where it was on Windows. The replacement window is created
+  centred on the primary display, and the saved frame was looked up using *that* window's monitor,
+  so a switch made from a secondary display moved the window to the primary one. The outgoing
+  window's monitor is now carried across the switch. The switch also gets a visible transition
+  again: the page fades in a veil before asking the native side to switch, and the teardown used to
+  run in the same turn, so not one frame of it ever reached the screen (#72).
+- Opening a PDF shows the in-app preview again. Clicking a document forwards the click to the
+  document's own download control, which is how the file gets decrypted and fetched, and that
+  forwarded click was being recorded as an explicit download. The explicit-download marker
+  suppresses the preview by design, so every attempt to open a document fell through to WhatsApp's
+  own viewer instead. A forwarded click no longer counts as a download, and a preview that is
+  suppressed now records which guard suppressed it (#70).
+- The Linux blank-window workaround is applied automatically. `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+  only took effect for launches from a shell, so it was lost the moment the app was started from a
+  menu or a desktop entry. Setting it once now records it and every later launch keeps the
+  fallback. It is also applied by itself when there is no DRM render node at all, which covers VMs,
+  containers and remote desktops without a table of specific hardware. Machines that can composite
+  in hardware are unaffected (#63).
+- The microphone diagnostics actually record now. The capture probe read
+  `navigator.mediaDevices` at document-creation time, when that API does not exist yet, and
+  returned silently — so the `mic:` lines it was written to produce had never been written by any
+  build, and every request for them came back empty. The probe retries until the API appears,
+  within a bound, and records when it installs (#57).
+
+---
+
 ## [1.6.3] - 2026-10-04
 
 > Attachment Saving Fixed & Idle Memory Reload

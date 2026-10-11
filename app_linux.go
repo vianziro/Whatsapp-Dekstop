@@ -712,6 +712,32 @@ func saveWindowState(dir string, win unsafe.Pointer, fallbackWidth, fallbackHeig
 	}
 }
 
+// linuxRenderingFallbacks applies the WebKitGTK rendering workaround this
+// machine needs, before the engine is created. The decision itself lives in
+// decideDMABUFDisable (rendering_fallback.go) so it can be unit-tested without
+// a Linux toolchain; this is only the part that touches the filesystem.
+func linuxRenderingFallbacks(userDataDir string) {
+	const disableVar = "WEBKIT_DISABLE_DMABUF_RENDERER"
+	marker := filepath.Join(userDataDir, "disable_dmabuf")
+
+	_, markerErr := os.Stat(marker)
+	renderNodes, _ := filepath.Glob("/dev/dri/renderD*")
+
+	disable, persist, reason := decideDMABUFDisable(os.Getenv(disableVar), markerErr == nil, renderNodes)
+
+	if persist {
+		if err := os.WriteFile(marker,
+			[]byte("Written because "+disableVar+" was set at launch.\n"), 0644); err == nil {
+			cacheDebugLog("rendering: %s was set; remembered it for future launches", disableVar)
+		}
+	}
+	if disable {
+		_ = os.Setenv(disableVar, "1")
+	}
+	cacheDebugLog("rendering: %s (%d render node(s)); %s=%q",
+		reason, len(renderNodes), disableVar, os.Getenv(disableVar))
+}
+
 func runApp() {
 	lockFile, isSingle := checkSingleInstance()
 	if !isSingle {
@@ -723,6 +749,7 @@ func runApp() {
 	}
 
 	userDataDir := getUserDataDir()
+	linuxRenderingFallbacks(userDataDir)
 	cacheDebugLog("startup: pid=%d profile=%s", os.Getpid(), userDataDir)
 	// WebKitGTK writes its network disk cache under ~/.cache keyed by app name.
 	// Also covers WebKitGTK 4.0/4.1 (webkitgtk-4.0) and 6.0 (webkitgtk-6.0) cache directories.

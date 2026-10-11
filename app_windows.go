@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/go-toast/toast"
 	"github.com/jchv/go-webview2"
+	"github.com/jchv/go-webview2/webviewloader"
 	"golang.org/x/sys/windows"
 )
 
@@ -51,6 +51,7 @@ var (
 	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
 	procSetProcessWorkingSetSize = kernel32.NewProc("SetProcessWorkingSetSize")
 	procGetCurrentProcess        = kernel32.NewProc("GetCurrentProcess")
+	procMessageBox               = user32.NewProc("MessageBoxW")
 
 	isAlwaysOnTopWin = false
 )
@@ -651,12 +652,101 @@ func drainThreadQueue() {
 	}
 }
 
+// webView2RuntimeURL is Microsoft's Evergreen bootstrapper, which installs the
+// runtime into an existing Windows 10/11 install. Windows 11 and current Edge
+// already carry it, which is why most machines never need this.
+const webView2RuntimeURL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+
+// switchVeilPaintDelay is how long the outgoing page is left alive after an
+// account switch is requested. It only has to cover the switch veil's 180 ms
+// fade; the window is destroyed as soon as it has.
+const switchVeilPaintDelay = 220 * time.Millisecond
+
+// showFatalDialog reports a startup failure the user can act on. Used only when
+// the app cannot start at all, so the missing GUI is not a concern.
+func showFatalDialog(title, message string) {
+	t, err := windows.UTF16PtrFromString(title)
+	if err != nil {
+		return
+	}
+	m, err := windows.UTF16PtrFromString(message)
+	if err != nil {
+		return
+	}
+	const mbOK, mbIconError, mbSetForeground, mbTopMost = 0x0, 0x10, 0x10000, 0x40000
+	_, _, _ = procMessageBox.Call(0,
+		uintptr(unsafe.Pointer(m)),
+		uintptr(unsafe.Pointer(t)),
+		uintptr(mbOK|mbIconError|mbSetForeground|mbTopMost))
+}
+
+// ensureWebView2Runtime reports whether the WebView2 Evergreen runtime is
+// present, and explains how to install it when it is not.
+//
+// This exists because of issue #73. WebView2 is not part of Windows itself: it
+// is a separate runtime that ships with Windows 11 and with current Edge, but a
+// Windows 10 image that has had neither can lack it. The vendored library does
+// not surface that condition -- it leaves its internal ICoreWebView2 pointer
+// nil and then dereferences it, so the failure arrives as a nil-pointer panic
+// *inside the library* (chromium.go:134, reached from Embed) instead of as a
+// return value. main() recovers that panic into wa_crash.log, which is why the
+// reporter saw the app close with no explanation.
+//
+// An inconclusive check returns true on purpose: a diagnostic that cannot answer
+// must not be the reason the app refuses to start.
+func ensureWebView2Runtime() bool {
+	version, err := webviewloader.GetInstalledVersion()
+	if err != nil {
+		cacheDebugLog("webview2 runtime check inconclusive: %v", err)
+		return true
+	}
+	if strings.TrimSpace(version) != "" {
+		cacheDebugLog("webview2 runtime %s", version)
+		return true
+	}
+	cacheDebugLog("webview2 runtime NOT installed; refusing to start")
+	showFatalDialog(windowTitle,
+		"WhatsApp Desk needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC.\n\n"+
+			"Install it from:\n"+webView2RuntimeURL+"\n\n"+
+			"Then start WhatsApp Desk again.")
+	return false
+}
+
+// createWebView2 wraps the vendored constructor so a library panic becomes a
+// message instead of a silent exit. The panic is caught here rather than in
+// main() because only here do we still know what the user was trying to do.
+func createWebView2(opts webview2.WebViewOptions) (w webview2.WebView, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			cacheDebugLog("webview2 creation panicked: %v", r)
+			showFatalDialog(windowTitle,
+				"WhatsApp Desk could not start its browser engine.\n\n"+
+					"This usually means the Microsoft Edge WebView2 Runtime is missing or damaged.\n\n"+
+					"Repair or install it from:\n"+webView2RuntimeURL)
+			w, ok = nil, false
+		}
+	}()
+	w = webview2.NewWithOptions(opts)
+	if w == nil {
+		cacheDebugLog("webview2 creation returned nil")
+		showFatalDialog(windowTitle,
+			"WhatsApp Desk could not start its browser engine.\n\n"+
+				"This usually means the Microsoft Edge WebView2 Runtime is missing or damaged.\n\n"+
+				"Repair or install it from:\n"+webView2RuntimeURL)
+		return nil, false
+	}
+	return w, true
+}
+
 func runApp() {
 	cleanupOldWindowsBinary()
 	initWindowsProcessProtection()
 	_, isSingle := checkSingleInstance()
 	if !isSingle {
 		os.Exit(0)
+	}
+	if !ensureWebView2Runtime() {
+		return
 	}
 	userDataDir := getUserDataDir()
 	executablePath, _ := os.Executable()
@@ -673,6 +763,13 @@ func runApp() {
 	// is declared per iteration and only an ordinary close leaves the loop.
 	// Hoisting it out of the loop inverted that test and made every switch fall
 	// straight out of runApp, which closed the app.
+	// The frame a switch must land on. The rebuilt window is created centred on
+	// the primary display, so reading the monitor key back from it would restore
+	// the *primary* display's frame and make a switch on a secondary monitor
+	// jump there. Carrying the outgoing window's key keeps the window where the
+	// user left it, which is half of what made a switch read as the app closing
+	// and reopening (issue #72).
+	var switchMonitorKey string
 	for {
 		switchRequested := false
 		dataDir, dataDirErr := activeAccountDataPath()
@@ -710,9 +807,9 @@ func runApp() {
 			},
 		}
 
-		w := webview2.NewWithOptions(opts)
-		if w == nil {
-			log.Fatalln("Gagal inisialisasi WebView2")
+		w, ok := createWebView2(opts)
+		if !ok {
+			return
 		}
 
 		// WebView2 reserves browser accelerator keys by default, so combinations
@@ -727,7 +824,14 @@ func runApp() {
 		w.SetSize(450, 320, webview2.HintMin)
 		w.SetSize(windowWidth, windowHeight, webview2.HintNone)
 
-		if state := loadWindowStateForMonitor(userDataDir, windowMonitorKey(hwnd)); state != nil {
+		// Prefer the monitor the outgoing window occupied; only fall back to the
+		// fresh window's own monitor on the very first iteration, where there is
+		// nothing to carry.
+		restoreKey := switchMonitorKey
+		if restoreKey == "" {
+			restoreKey = windowMonitorKey(hwnd)
+		}
+		if state := loadWindowStateForMonitor(userDataDir, restoreKey); state != nil {
 			procMoveWindow.Call(hwnd, uintptr(int32(state.X)), uintptr(int32(state.Y)), uintptr(int32(state.Width)), uintptr(int32(state.Height)), 1)
 			if state.Maximized {
 				procShowNormal.Call(hwnd, uintptr(SW_MAXIMIZE))
@@ -962,7 +1066,22 @@ func runApp() {
 			switchRequested = true
 			// End the session only after this bridge call has returned; the next
 			// loop iteration destroys this engine and builds the new one.
-			w.Dispatch(func() { w.Terminate() })
+			//
+			// The teardown waits for the page's switch veil to finish painting.
+			// The veil fades in over 180 ms, and terminating in the same turn
+			// destroyed the window before one veil frame reached the screen, so
+			// an account switch read as the app closing and reopening instead of
+			// as a transition (issue #72).
+			//
+			// Terminate() posts a quit message to the *calling* thread's queue,
+			// so the timer hands the work back to the message loop rather than
+			// calling it from the timer's own goroutine, which would post to a
+			// thread that never runs the loop.
+			w.Dispatch(func() {
+				time.AfterFunc(switchVeilPaintDelay, func() {
+					w.Dispatch(func() { w.Terminate() })
+				})
+			})
 			return true
 		})
 
@@ -1006,6 +1125,9 @@ func runApp() {
 
 		w.Run()
 		close(stopUpdateTicker)
+		// Capture where this window was before it goes away, so the next
+		// iteration can put its replacement in exactly the same place.
+		switchMonitorKey = windowMonitorKey(hwnd)
 		saveWindowState(userDataDir, hwnd)
 		w.Destroy()
 

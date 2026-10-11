@@ -43,6 +43,26 @@ func TestMacProfileStoreFallsBackToEphemeralWhenNamedStoreIsUnavailable(t *testi
 	}
 }
 
+// stripCommentLines removes whole-line comments so a guard can never be
+// tripped by prose. A comment that merely *mentions* a call site (for example
+// "the code after w.Run() is never reached") must not count as that call site
+// existing, or the assertion below fires on a correct build. Trailing comments
+// on code lines are left alone on purpose: cutting from the first "//" would
+// also truncate any line containing a URL.
+func stripCommentLines(src string) string {
+	lines := strings.Split(src, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			kept = append(kept, "")
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // Switching accounts must stay inside the same OS process: relaunching the
 // executable bounces the Dock, flashes the window, and was reported by users
 // as an unwanted "restart". The single WebView still has to be fully torn
@@ -59,7 +79,7 @@ func TestMacAccountSwitchStaysInProcessAfterFullWebViewTeardown(t *testing.T) {
 	if start < 0 {
 		t.Fatal("runApp implementation not found")
 	}
-	body := content[start:]
+	body := stripCommentLines(content[start:])
 
 	for _, marker := range []string{
 		`Bind("getAccountsNative"`,
