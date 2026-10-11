@@ -1,0 +1,62 @@
+name: Test
+
+# Runs on every push to main and on every pull request.
+#
+# This is deliberately separate from build.yml, which publishes releases and is
+# manual-only for a reason documented in its own header (hosted runners need a
+# healthy account, and a tag trigger only produced four-second failures while
+# that was broken). This workflow does not publish anything: it only checks that
+# a change builds on every platform we ship and passes its tests, so a
+# regression is caught before a release is cut rather than during one.
+#
+# If these runs also fail after a few seconds with no step having started, the
+# cause is the account-level runner problem, not the change — check the Actions
+# tab for whether any step ran at all.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Jammy rather than latest: the Linux build links WebKitGTK 4.0 through cgo,
+    # and 4.0 is not packaged for Noble. The release workflow uses the same
+    # image for the same reason.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Pinned to 1.26 on purpose: building with 1.27 emits objects built for
+          # macOS 13 while the bundle still declares 12.0, which is the #66/#67
+          # defect returning. 1.26 is the last release that runs on macOS 12.
+          go-version: "1.26"
+
+      - name: Install WebKitGTK headers (the Linux build needs cgo)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l . | grep -v '^vendor/' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet (linux)
+        run: go vet ./...
+
+      # The Windows build is pure Go, so it can be checked from Linux. This is
+      # what catches a tray or updater change that only compiles on Windows.
+      - name: Build and vet (windows, no cgo)
+        run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+
+      - name: Test
+        run: go test ./...

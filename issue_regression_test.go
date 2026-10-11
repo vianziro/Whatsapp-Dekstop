@@ -538,3 +538,34 @@ func TestWindowsTrayIsFailOpenAndDoesNotSwallowTheAppsOwnClose(t *testing.T) {
 		t.Error("the tray icon is never removed on exit, leaving a ghost icon in the notification area")
 	}
 }
+
+// --- CI: a change is tested before a release, not during one ---------------
+
+// TestCIHasATestWorkflowAndTheReleaseStaysManual pins the CI split. The release
+// workflow is manual-only on purpose: it used to run on every v* tag, and while
+// hosted runners could not start, each tag push produced a four-second failure
+// that looked like a broken build. The test workflow is what should run
+// automatically, so a regression is caught before a release is cut.
+func TestCIHasATestWorkflowAndTheReleaseStaysManual(t *testing.T) {
+	test := readProjectFile(t, ".github/workflows/test.yml")
+
+	if !strings.Contains(test, "pull_request:") {
+		t.Error("the test workflow does not run on pull requests, so a change is still only tested when a release is cut")
+	}
+	if !strings.Contains(test, "push:") {
+		t.Error("the test workflow does not run on push")
+	}
+	// Building with Go 1.27 emits objects for macOS 13 while the bundle still
+	// declares 12.0, which is the #66/#67 defect returning.
+	if !strings.Contains(test, `go-version: "1.26"`) {
+		t.Error("the test workflow does not pin Go 1.26, so CI would build with a toolchain that breaks the macOS 12 target")
+	}
+
+	release := readProjectFile(t, ".github/workflows/build.yml")
+	if !strings.Contains(release, "workflow_dispatch:") {
+		t.Error("the release workflow is no longer manually triggered")
+	}
+	if strings.Contains(release, "tags:") {
+		t.Error("a tag trigger was re-added to the release workflow, which only produces failing runs while hosted runners cannot start")
+	}
+}
