@@ -2,7 +2,16 @@
 set -e
 
 APP_NAME="WhatsApp Desk"
-VERSION="${1:-1.6.4}"  # single source of truth: injected via -X main.appVersion below
+# Version SSOT: appVersion in updater.go. A bare call used to default to a
+# stale hardcoded number — 1.6.6 was briefly built with a 1.6.4 Info.plist and
+# (on Windows) a 1.6.4 appVersion stamp, which makes the in-app updater see
+# the app as outdated forever. Derive the default; $1 still overrides.
+VERSION="${1:-$(sed -n 's/^var appVersion = "\(.*\)"$/\1/p' updater.go)}"
+if [ -z "$VERSION" ]; then
+    echo "ERROR: cannot read appVersion from updater.go; pass the version as \$1" >&2
+    exit 1
+fi
+echo "Building WhatsApp Desk v${VERSION}"
 BINARY_NAME="WhatsApp"
 BUNDLE_DIR="${APP_NAME}.app"
 CONTENTS_DIR="${BUNDLE_DIR}/Contents"

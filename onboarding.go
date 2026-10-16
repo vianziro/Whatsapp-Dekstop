@@ -1,7 +1,14 @@
 package main
 
+import "strings"
+
+// The onboarding copy is version-driven through the same __WA_APP_VERSION__
+// placeholder the other injected scripts use (replaced with appVersion in
+// getOnboardingScript below), so a release can never ship a welcome screen
+// announcing the previous version — 1.6.6 briefly greeted new users with
+// "WhatsApp Desk __WA_APP_VERSION__ is ready" because the title was hardcoded.
 func getOnboardingScript() string {
-	return `
+	return strings.ReplaceAll(`
 		(function() {
 			var ONBOARDING_KEY = 'whatsapp_desktop_onboarded_v5';
 
@@ -46,7 +53,7 @@ func getOnboardingScript() string {
 				intro.style.cssText = 'margin-bottom:20px;';
 				intro.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">' +
 					'<span style="width:10px;height:10px;border-radius:50%;background:#00a884;flex:none;"></span>' +
-					'<h1 id="wa-onboarding-title" style="font-size:18px;line-height:1.3;font-weight:600;letter-spacing:-.15px;margin:0;">WhatsApp Desk 1.6.4 is ready</h1>' +
+					'<h1 id="wa-onboarding-title" style="font-size:18px;line-height:1.3;font-weight:600;letter-spacing:-.15px;margin:0;">WhatsApp Desk __WA_APP_VERSION__ is ready</h1>' +
 					'</div>' +
 					'<p style="font-size:13px;line-height:1.55;color:' + muted + ';margin:0;max-width:58ch;">Log in or scan QR code as usual. This release adds a second WhatsApp account with fully isolated profiles and the quick-tool dock on the left edge, and hardens drag &amp; drop, document previews, and account switching.</p>';
 				panel.appendChild(intro);
@@ -131,5 +138,5 @@ func getOnboardingScript() string {
 			}
 			initCheck();
 		})();
-	`
+	`, "__WA_APP_VERSION__", appVersion)
 }

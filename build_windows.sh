@@ -16,7 +16,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.6.4}"
+# Version SSOT: appVersion in updater.go. A bare call used to default to a
+# stale hardcoded number, which stamped an old appVersion into the binary and
+# made the in-app updater believe the app was outdated forever.
+VERSION="${1:-$(sed -n 's/^var appVersion = "\(.*\)"$/\1/p' updater.go)}"
+if [ -z "$VERSION" ]; then
+  echo "ERROR: cannot read appVersion from updater.go; pass the version as \$1" >&2
+  exit 1
+fi
 ARCH="${2:-amd64}"
 OUT="dist_win/WhatsAppDesk.exe"
 mkdir -p dist_win

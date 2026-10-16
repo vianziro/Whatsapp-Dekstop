@@ -54,6 +54,21 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
   default one. `TestAccountFallbackNeverHappensSilently` pins the loud logging at both
   platform fallback sites (the Windows-only code cannot be exercised by the suite).
 
+### Release engineering
+
+- **The welcome screen can no longer announce a stale version.** The onboarding overlay
+  hardcoded "WhatsApp Desk 1.6.4 is ready", so every later release greeted new users with the
+  old number. The title now goes through the same `__WA_APP_VERSION__` placeholder the other
+  injected scripts use.
+- **The build scripts derive their version from the SSOT.** `build_mac.sh`, `build_windows.sh`
+  and `build_windows_installer.sh` defaulted to a hardcoded `1.6.4`; a bare call stamped that
+  stale `appVersion` into the binary and the in-app updater would then offer the same "update"
+  forever (the freshly downloaded binary still believed it was 1.6.4). All three now default to
+  `appVersion` in `updater.go` and fail loudly if it cannot be read.
+- `TestReleaseVersionMatchesChangelogHead`, `TestBuildScriptsDeriveVersionFromTheSSOT`,
+  `TestOnboardingTitleShipsTheRealVersion` and `TestUpdaterAssetNamesExistInTheChecksumList`
+  pin all of the above.
+
 ---
 
 ## [1.6.5] - 2026-10-16

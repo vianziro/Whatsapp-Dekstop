@@ -12,7 +12,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.6.4}"
+# Version SSOT: appVersion in updater.go (same defaulting as build_windows.sh),
+# so the wizard graphics, the Add/Remove Programs entry and the binary stamp can
+# never drift apart when the script is called without an argument.
+VERSION="${1:-$(sed -n 's/^var appVersion = "\(.*\)"$/\1/p' updater.go)}"
+if [ -z "$VERSION" ]; then
+  echo "ERROR: cannot read appVersion from updater.go; pass the version as \$1" >&2
+  exit 1
+fi
 
 echo "== 1/3 building Windows binary (v${VERSION}) =="
 bash build_windows.sh "$VERSION"
