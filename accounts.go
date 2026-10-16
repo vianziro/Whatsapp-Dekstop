@@ -118,7 +118,119 @@ func (r AccountRegistry) hasAccount(id string) bool {
 func loadAccountRegistry() (AccountRegistry, error) {
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()
-	return loadAccountRegistryLocked()
+
+	// A missing registry file alongside an existing snapshot is not a fresh
+	// install (fresh installs have neither): the registry file was lost. Start
+	// from the snapshot instead of bootstrapping a brand-new default account,
+	// which would orphan the second account's on-disk profile and drop that
+	// user straight onto the QR page.
+	if _, statErr := os.Stat(accountRegistryFilePath()); os.IsNotExist(statErr) {
+		if snapshot, ok := loadAccountRegistrySnapshotLocked(); ok {
+			cacheDebugLog("accounts registry file is missing; recovering the last known accounts snapshot")
+			// Best effort: even if the heal fails, this run already has the
+			// snapshot in hand.
+			if healErr := saveAccountRegistryLocked(snapshot); healErr != nil {
+				cacheDebugLog("accounts registry heal failed (%v); continuing from the snapshot", healErr)
+			}
+			return snapshot, nil
+		}
+	}
+
+	var registry AccountRegistry
+	var err error
+	for attempt := 0; attempt < accountRegistryReadAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(accountRegistryReadRetryDelay)
+		}
+		registry, err = loadAccountRegistryLocked()
+		if err == nil {
+			// Migration: installs from before the snapshot existed hold a
+			// valid registry but no snapshot yet. Seed it once so the very
+			// first read failure is already covered.
+			if _, ok := loadAccountRegistrySnapshotLocked(); !ok {
+				saveAccountRegistrySnapshotLocked(registry)
+			}
+			return registry, nil
+		}
+	}
+	// The registry is unreadable or corrupt after every attempt. Rather than
+	// reporting an error up the chain - which the engine start loops used to
+	// answer by silently loading the DEFAULT account's session, i.e. the other
+	// account's WhatsApp - fall back to the last known good state. This is the
+	// fix for "the two accounts suddenly alternate": a transient read failure
+	// can no longer select the wrong profile.
+	if snapshot, ok := loadAccountRegistrySnapshotLocked(); ok {
+		cacheDebugLog("accounts registry unavailable (%v); using the last known accounts snapshot", err)
+		// Heal the on-disk registry so the next read does not have to fall
+		// back too. Best effort; the snapshot already covers this run.
+		if healErr := saveAccountRegistryLocked(snapshot); healErr != nil {
+			cacheDebugLog("accounts registry heal failed (%v); continuing from the snapshot", healErr)
+		}
+		return snapshot, nil
+	}
+	return AccountRegistry{}, err
+}
+
+const (
+	accountRegistryReadAttempts   = 3
+	accountRegistryReadRetryDelay = 50 * time.Millisecond
+)
+
+// accountSnapshotFilePath mirrors the registry location, so tests that
+// relocate the registry automatically relocate the snapshot with it and cannot
+// leak one test's snapshot into another's directory.
+func accountSnapshotFilePath() string {
+	return filepath.Join(filepath.Dir(accountRegistryFilePath()), "accounts.snapshot.json")
+}
+
+// loadAccountRegistrySnapshotLocked reads the last known good registry copy.
+// Like the registry itself, a snapshot is only trusted when it is internally
+// valid: right version, one or two accounts, and the active id among them.
+func loadAccountRegistrySnapshotLocked() (AccountRegistry, bool) {
+	data, err := os.ReadFile(accountSnapshotFilePath())
+	if err != nil {
+		return AccountRegistry{}, false
+	}
+	var registry AccountRegistry
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return AccountRegistry{}, false
+	}
+	if registry.Version != 1 || len(registry.Accounts) == 0 || len(registry.Accounts) > maxAccounts || !registry.hasAccount(registry.ActiveAccountID) {
+		return AccountRegistry{}, false
+	}
+	return registry, true
+}
+
+// saveAccountRegistrySnapshotLocked atomically copies the registry to the
+// snapshot. Best effort by design: a failed snapshot write must never break
+// the operation that produced the registry change.
+func saveAccountRegistrySnapshotLocked(registry AccountRegistry) {
+	data, err := json.MarshalIndent(registry, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(accountSnapshotFilePath())
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, "accounts-snap-*.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tmpName, accountSnapshotFilePath())
 }
 
 func loadAccountRegistryLocked() (AccountRegistry, error) {
@@ -174,7 +286,14 @@ func saveAccountRegistryLocked(registry AccountRegistry) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, accountRegistryFilePath())
+	if err := os.Rename(tmpName, accountRegistryFilePath()); err != nil {
+		return err
+	}
+	// Every successful registry write also refreshes the last known good
+	// snapshot, so the fallback in loadAccountRegistry always reflects the
+	// newest state the app ever had.
+	saveAccountRegistrySnapshotLocked(registry)
+	return nil
 }
 
 func createAccount(label string) (Account, error) {

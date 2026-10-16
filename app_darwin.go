@@ -1540,11 +1540,12 @@ func runApp() {
 	for {
 		profileID, err := activeAccountProfileIdentifier()
 		if err != nil {
-			// Never exit because the registry could not be read: a transient
-			// read failure (e.g. a partial write racing this read) used to
-			// return from runApp, which closes the app with no window, no crash
-			// report and no explanation - indistinguishable from a crash. Fall
-			// back to the default profile instead; the dock can still switch.
+			// Both the registry and its last known snapshot were unreadable.
+			// Never exit because of it: a prior regression closed the app with
+			// no window, no crash report and no explanation. The default
+			// profile is now only the LAST resort - a transient registry read
+			// failure is answered by the snapshot, not by loading the other
+			// account's session. The dock can still switch.
 			cacheDebugLog("account profile unavailable (%v); falling back to the default profile", err)
 			profileID = ""
 		}
@@ -1555,6 +1556,7 @@ func runApp() {
 			_ = os.Unsetenv("WA_DESK_PROFILE_UUID")
 		}
 		cacheDebugLog("startup: pid=%d profile=%s account=%s", os.Getpid(), userDataDir, profileID)
+		auditAccountWebKitStore(profileID)
 
 		w := webview.New(false)
 		if w == nil {
@@ -1959,6 +1961,48 @@ func applyActiveAccountProfile() error {
 		return os.Unsetenv("WA_DESK_PROFILE_UUID")
 	}
 	return os.Setenv("WA_DESK_PROFILE_UUID", profileID)
+}
+
+// accountStoreGracePeriod is how long an account may legitimately exist
+// without an on-disk WebKit store yet: a freshly created account has not run
+// an engine, so a missing store means nothing until well past its first launch.
+const accountStoreGracePeriod = 10 * time.Minute
+
+// auditAccountWebKitStore reports when a non-default account's persistent
+// WebKit store is missing at startup. The vendored engine (webview.h) silently
+// falls back to an EPHEMERAL data store when both the macOS 14+ named-store
+// API and the older _WKWebsiteDataStoreConfiguration SPI fail - a session that
+// vanishes on every quit and reads to the user as "always back to the QR
+// page". That fallback is invisible unless WA_DESK_DEBUG was set at launch, so
+// surface it here instead, into wa_debug.log where users can actually find it.
+// Read-only by design: this never creates, moves or deletes store material.
+func auditAccountWebKitStore(profileID string) {
+	if profileID == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	storeDir := filepath.Join(home, "Library", "WebKit", "com.whatsapp.desk", "WebsiteDataStore", profileID)
+	if _, err := os.Stat(storeDir); err == nil || !os.IsNotExist(err) {
+		return
+	}
+	registry, err := loadAccountRegistry()
+	if err != nil {
+		return
+	}
+	for _, account := range registry.Accounts {
+		if account.ID != profileID {
+			continue
+		}
+		if time.Since(account.CreatedAt) < accountStoreGracePeriod {
+			return
+		}
+		cacheDebugLog("account %q: WebKit persistent store %s is missing after the account existed for %s; if this account keeps returning to the QR page, the engine fell back to an ephemeral store and no session can survive a restart",
+			account.Label, storeDir, time.Since(account.CreatedAt).Round(time.Second))
+		return
+	}
 }
 
 // swapBrowserToActiveAccount rebuilds the WebView's browser view in place for

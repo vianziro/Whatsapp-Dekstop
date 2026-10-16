@@ -607,3 +607,25 @@ func TestCIHasATestWorkflowAndTheReleaseStaysManual(t *testing.T) {
 		t.Error("a tag trigger was re-added to the release workflow, which only produces failing runs while hosted runners cannot start")
 	}
 }
+
+// TestAccountFallbackNeverHappensSilently pins the loud part of the
+// wrong-profile fix (the "accounts suddenly alternate" / "straight to the QR
+// page" reports): a transient registry failure used to switch the engine onto
+// the OTHER account's session with no trace anywhere. The snapshot fallback in
+// accounts.go now answers that failure, and the last-resort branches that
+// remain must say so in wa_debug.log. Windows-only code cannot be exercised by
+// the suite, so the call sites are asserted by inspection.
+func TestAccountFallbackNeverHappensSilently(t *testing.T) {
+	windows := readProjectFile(t, "app_windows.go")
+	if !strings.Contains(windows, `cacheDebugLog("account profile unavailable (%v); falling back to the legacy user-data dir", dataDirErr)`) {
+		t.Error("the Windows last-resort user-data fallback no longer logs; a wrong-profile startup would again be invisible in wa_debug.log")
+	}
+
+	darwin := readProjectFile(t, "app_darwin.go")
+	if !strings.Contains(darwin, "auditAccountWebKitStore(profileID)") {
+		t.Error("the macOS engine loop no longer audits the account's WebKit store; an ephemeral-store fallback (always back to the QR page) would again be invisible unless WA_DESK_DEBUG was set at launch")
+	}
+	if !strings.Contains(darwin, "Library\", \"WebKit\", \"com.whatsapp.desk\", \"WebsiteDataStore\", profileID") {
+		t.Error("auditAccountWebKitStore no longer inspects ~/Library/WebKit/com.whatsapp.desk/WebsiteDataStore/<uuid>, so it would audit the wrong directory")
+	}
+}

@@ -17,6 +17,45 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ---
 
+## [1.6.6] - 2026-10-16
+
+> Wrong-Account Startup and QR-Page Fixes
+
+### Fixed
+
+- **macOS & Windows: a transient accounts-registry read failure can no longer start the engine
+  on the other account's session.** Both platform loops answered an unreadable `accounts.json`
+  by silently falling back to the *default* account's profile — on macOS by clearing
+  `WA_DESK_PROFILE_UUID`, on Windows by pointing WebView2 at the legacy user-data dir. To the
+  user that read as the two accounts "suddenly alternating", or as landing straight on the QR
+  page. The registry read is now retried, and every successful registry write also maintains an
+  atomically written last-known-good snapshot (`accounts.snapshot.json`) beside it. When the
+  registry is unreadable or corrupt after the retries, the app continues from that snapshot
+  instead of the other account's profile, and heals the on-disk registry from it. A *lost*
+  registry file is likewise recovered from the snapshot rather than bootstrapping a brand-new
+  default account, which would have orphaned the second account's on-disk profile. The
+  last-resort default-profile branches remain only for the both-unreadable case, and now log
+  loudly to `wa_debug.log` (the Windows branch was previously silent).
+- **macOS: an ephemeral-store fallback for the second account is now visible in
+  `wa_debug.log`.** The vendored engine silently gives a non-default account an *ephemeral*
+  WebKit data store when both the macOS 14+ named-store API and the older
+  `_WKWebsiteDataStoreConfiguration` SPI fail — a session that vanishes on every quit, reading
+  exactly as "always back to the QR page". That fallback previously printed only to stderr and
+  only under `WA_DESK_DEBUG=1`, which a Finder launch never sets. Startup now audits
+  `~/Library/WebKit/com.whatsapp.desk/WebsiteDataStore/<uuid>/` and reports a missing
+  persistent store for an account old enough to have one. The audit is strictly read-only.
+
+### Tests
+
+- `TestAccountRegistrySnapshotSeededOnFirstLoad`,
+  `TestAccountRegistrySnapshotRecoversFromCorruptRegistry`,
+  `TestAccountRegistrySnapshotRecoversFromMissingRegistryFile` pin the snapshot behaviour,
+  including that recovery keeps the last known active account instead of minting a fresh
+  default one. `TestAccountFallbackNeverHappensSilently` pins the loud logging at both
+  platform fallback sites (the Windows-only code cannot be exercised by the suite).
+
+---
+
 ## [1.6.5] - 2026-10-16
 
 > Windows Title Bar Regression Fix

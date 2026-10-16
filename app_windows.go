@@ -774,6 +774,13 @@ func runApp() {
 		switchRequested := false
 		dataDir, dataDirErr := activeAccountDataPath()
 		if dataDirErr != nil {
+			// Both the registry and its last known snapshot were unreadable.
+			// The engine still has to start somewhere, so the legacy dir is
+			// the last resort - but this previously happened SILENTLY, which
+			// read to the user as "the accounts suddenly alternate": a
+			// transient read failure showed the OTHER account's session. Log
+			// it loudly so wa_debug.log can explain a wrong-profile startup.
+			cacheDebugLog("account profile unavailable (%v); falling back to the legacy user-data dir", dataDirErr)
 			dataDir = userDataDir
 		}
 

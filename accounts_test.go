@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
@@ -192,5 +194,97 @@ func TestAccountRegistryRejectsInvalidLabelsAndUnknownAccount(t *testing.T) {
 	}
 	if err := setActiveAccount("missing"); err == nil {
 		t.Fatal("unknown account must be rejected")
+	}
+}
+
+// seedSecondAccountActive builds the two-account state the fallback tests
+// need: "Work" exists, is active, and a snapshot of that state is on disk.
+func seedSecondAccountActive(t *testing.T) (workID string, registryPath string) {
+	t.Helper()
+	if _, err := loadAccountRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	work, err := createAccount("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setActiveAccount(work.ID); err != nil {
+		t.Fatal(err)
+	}
+	return work.ID, accountRegistryFilePath()
+}
+
+func TestAccountRegistrySnapshotSeededOnFirstLoad(t *testing.T) {
+	withAccountRegistryFile(t)
+
+	registry, err := loadAccountRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(accountSnapshotFilePath())
+	if err != nil {
+		t.Fatalf("first successful load must seed the snapshot: %v", err)
+	}
+	var snapshot AccountRegistry
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatalf("snapshot is not a valid registry copy: %v", err)
+	}
+	if snapshot.ActiveAccountID != registry.ActiveAccountID || len(snapshot.Accounts) != len(registry.Accounts) {
+		t.Fatalf("snapshot %#v does not match registry %#v", snapshot, registry)
+	}
+}
+
+func TestAccountRegistrySnapshotRecoversFromCorruptRegistry(t *testing.T) {
+	withAccountRegistryFile(t)
+	workID, registryPath := seedSecondAccountActive(t)
+
+	// Simulate the failure that used to flip the app onto the other account's
+	// session: an unreadable registry at engine (re)build time.
+	if err := os.WriteFile(registryPath, []byte("{corrupted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := loadAccountRegistry()
+	if err != nil {
+		t.Fatalf("a corrupt registry must fall back to the snapshot, got error: %v", err)
+	}
+	if registry.ActiveAccountID != workID {
+		t.Fatalf("fallback must keep the last known active account %q, got %q", workID, registry.ActiveAccountID)
+	}
+	if len(registry.Accounts) != 2 {
+		t.Fatalf("fallback must keep both accounts, got %#v", registry.Accounts)
+	}
+	// The fallback also heals the on-disk registry, so the next read is clean.
+	again, err := loadAccountRegistry()
+	if err != nil {
+		t.Fatalf("healed registry must read normally: %v", err)
+	}
+	if again.ActiveAccountID != workID {
+		t.Fatalf("healed registry lost the active account: %#v", again)
+	}
+}
+
+func TestAccountRegistrySnapshotRecoversFromMissingRegistryFile(t *testing.T) {
+	withAccountRegistryFile(t)
+	workID, registryPath := seedSecondAccountActive(t)
+
+	if err := os.Remove(registryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := loadAccountRegistry()
+	if err != nil {
+		t.Fatalf("a lost registry file must fall back to the snapshot, got error: %v", err)
+	}
+	if registry.ActiveAccountID != workID {
+		t.Fatalf("recovery must keep the last known active account %q, got %q", workID, registry.ActiveAccountID)
+	}
+	// A brand-new bootstrap would have minted a fresh default account and
+	// orphaned the second account's profile; that must not happen.
+	if len(registry.Accounts) != 2 {
+		t.Fatalf("recovery must keep both accounts, got %#v", registry.Accounts)
+	}
+	if _, err := os.Stat(registryPath); err != nil {
+		t.Fatalf("recovery must heal the registry file back onto disk: %v", err)
 	}
 }
