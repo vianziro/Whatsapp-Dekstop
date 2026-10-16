@@ -37,8 +37,8 @@ const (
 	trayScClose        = 0xF060
 	traySwHide         = 0
 	traySwRestore      = 9
-	trayGwlpWndProc    = ^uintptr(15) // GWLP_WNDPROC (-16)
-	trayHwndMessage    = ^uintptr(2)  // HWND_MESSAGE (-3)
+	trayGwlpWndProc    = ^uintptr(3) // GWLP_WNDPROC (-4); NOT -16, which is GWL_STYLE
+	trayHwndMessage    = ^uintptr(2) // HWND_MESSAGE (-3)
 	trayNimAdd         = 0
 	trayNimDelete      = 2
 	trayNifMessage     = 0x00000001

@@ -17,6 +17,26 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ---
 
+## [1.6.5] - 2026-10-16
+
+> Windows Title Bar Regression Fix
+
+### Fixed
+
+- **Windows: the title bar and its minimise, maximise and close buttons are back.** The 1.6.4
+  tray work installed the window subclass through `SetWindowLongPtrW` with the wrong field index:
+  `-16`, which is `GWL_STYLE`, where `-4` (`GWLP_WNDPROC`) belongs. The call therefore wrote the
+  callback's *address* into the window's style field instead of installing the window procedure.
+  A style is a small bitfield, not an address, and the low bits of that address carried `WS_CHILD`
+  while dropping `WS_CAPTION`, so on every Windows launch the title bar disappeared, the window
+  could not be dragged, and — when the address happened to make the window malformed — clicking
+  the title bar crashed the app inside the library's own window procedure. The close-to-tray
+  behaviour never actually engaged either, because the subclass was never installed. The index is
+  now correct, a regression test pins it to `-4`, and the tray behaves as 1.6.4 intended.
+  (#75, #76, #77, #78, #79, #80, #81)
+
+---
+
 ## [1.6.4] - 2026-10-11
 
 > Session, Startup, Preview and Windows Tray Fixes

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -536,6 +538,42 @@ func TestWindowsTrayIsFailOpenAndDoesNotSwallowTheAppsOwnClose(t *testing.T) {
 	}
 	if !strings.Contains(app, "trayDetach()") {
 		t.Error("the tray icon is never removed on exit, leaving a ghost icon in the notification area")
+	}
+}
+
+// TestWindowsTraySubclassesWithTheWndProcIndexNotTheStyleIndex guards the defect
+// that shipped in 1.6.4 and produced five Windows bug reports in a day.
+//
+// SetWindowLongPtrW was called with index -16, which is GWL_STYLE, where
+// GWLP_WNDPROC (-4) belongs. The call therefore wrote the subclass callback's
+// *address* into the window's style field instead of installing the window
+// procedure. A style is a small bitfield, not an address: the low bits of the
+// callback address carry WS_CHILD and drop WS_CAPTION, so on every Windows
+// launch the title bar and its minimise/maximise/close buttons disappeared and
+// the window could not be dragged. On machines where the address happened to
+// make the window malformed, clicking the title bar then crashed the process
+// inside the library's own window procedure. The index must stay -4.
+func TestWindowsTraySubclassesWithTheWndProcIndexNotTheStyleIndex(t *testing.T) {
+	src := readProjectFile(t, "tray_windows.go")
+
+	re := regexp.MustCompile(`trayGwlpWndProc\s*=\s*\^uintptr\((\d+)\)`)
+	m := re.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("trayGwlpWndProc is no longer defined as ^uintptr(N); the field SetWindowLongPtrW writes cannot be verified")
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("cannot read the index out of %q: %v", m[0], err)
+	}
+	// ^uintptr(n) has the same bit pattern as the signed -n-1.
+	index := ^n
+	if index != -4 {
+		t.Errorf("SetWindowLongPtrW is called with index %d, but GWLP_WNDPROC is -4. -16 is GWL_STYLE: using it overwrites the window style instead of installing the subclass, which strips the title bar and can crash the app when the title bar is clicked (the 1.6.4 regression)", index)
+	}
+
+	// The call site must use the constant, so this guard keeps watching it.
+	if !strings.Contains(src, "procTraySetWindowLongPtr.Call(hwnd, trayGwlpWndProc, trayMainProcCallback)") {
+		t.Error("the subclass call site no longer passes trayGwlpWndProc; a bare index there could regress without this guard noticing")
 	}
 }
 
