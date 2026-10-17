@@ -43,6 +43,7 @@ build_windows() {
     GOOS=windows GOARCH=amd64 CGO_ENABLED="${CGO_FLAG}" \
         go build -ldflags="-H windowsgui -X main.appVersion=${VERSION}" \
         -trimpath -o WhatsAppDesk.exe .
+    bash sign_windows_artifact.sh "WhatsAppDesk.exe"
     rm -f WhatsApp-Desk-Windows-x64.zip
     zip -q WhatsApp-Desk-Windows-x64.zip WhatsAppDesk.exe
     echo "Created: WhatsAppDesk.exe and WhatsApp-Desk-Windows-x64.zip"
@@ -57,6 +58,7 @@ build_windows() {
             MINGW*|MSYS*|CYGWIN*) makensis "/DVERSION=${VERSION}" "installer/windows/WhatsAppDesk.nsi" ;;
             *) makensis "-DVERSION=${VERSION}" "installer/windows/WhatsAppDesk.nsi" ;;
         esac
+        bash sign_windows_artifact.sh "WhatsApp-Desk-Windows-x64-Setup.exe"
         echo "Created: WhatsApp-Desk-Windows-x64-Setup.exe"
     else
         echo "Notice: makensis not found, skipping Setup.exe (CI builds it on windows-latest)."

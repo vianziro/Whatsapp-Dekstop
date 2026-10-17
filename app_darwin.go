@@ -1273,7 +1273,22 @@ import (
 	webview "github.com/webview/webview_go"
 )
 
-const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+const (
+	chromeUserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	safariTestUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+)
+
+// macUserAgent provides a reversible Safari-UA experiment for issue #57. The
+// default remains the Chrome compatibility identity used by WhatsApp Web; only
+// a diagnostic launch with WA_DESK_SAFARI_UA_TEST=1 selects Safari's identity.
+func macUserAgent() string {
+	if os.Getenv("WA_DESK_SAFARI_UA_TEST") == "1" {
+		return safariTestUserAgent
+	}
+	return chromeUserAgent
+}
+
+var activeMacUserAgent = chromeUserAgent
 
 func getUserDataDir() string {
 	home, err := os.UserHomeDir()
@@ -1502,6 +1517,10 @@ func runApp() {
 	if lockFile != nil {
 		defer lockFile.Close()
 	}
+	activeMacUserAgent = macUserAgent()
+	if activeMacUserAgent == safariTestUserAgent {
+		cacheDebugLog("mic: diagnostic Safari user-agent mode enabled; Chrome compatibility identity is bypassed")
+	}
 
 	userDataDir := getUserDataDir()
 
@@ -1588,7 +1607,7 @@ func runApp() {
 		C.free(unsafe.Pointer(cTheme))
 
 		// 2. Set native WebKit customUserAgent to Google Chrome & auto-grant media capture
-		cua := C.CString(userAgent)
+		cua := C.CString(activeMacUserAgent)
 		C.setWKWebViewUserAgentAndMedia(w.Window(), cua)
 		C.free(unsafe.Pointer(cua))
 
@@ -1705,6 +1724,10 @@ func runApp() {
 			}
 			return path
 		})
+		_ = w.Bind("beginChunkedDownloadNative", beginChunkedDownload)
+		_ = w.Bind("appendDownloadChunkNative", appendDownloadChunk)
+		_ = w.Bind("finishChunkedDownloadNative", finishChunkedDownload)
+		_ = w.Bind("abortChunkedDownloadNative", abortChunkedDownload)
 
 		// Why the last save did not go exactly as asked: the error, or a note
 		// that the file went to the default folder instead (#68).
@@ -1888,7 +1911,7 @@ func runApp() {
 			return true
 		})
 
-		w.Init(getInitScript(userAgent))
+		w.Init(getInitScript(activeMacUserAgent))
 		w.Navigate(appURL)
 		debugLogProcessStats("after-navigate")
 
@@ -2030,7 +2053,7 @@ func swapBrowserToActiveAccount(w webview.WebView) bool {
 	// the view itself - custom user agent, media playback policy, layer settings
 	// - and the cached pointer used by the memory purge must be re-applied.
 	// Without the Chrome user agent WhatsApp Web refuses to serve the app shell.
-	cua := C.CString(userAgent)
+	cua := C.CString(activeMacUserAgent)
 	C.setWKWebViewUserAgentAndMedia(w.Window(), cua)
 	C.free(unsafe.Pointer(cua))
 	cacheDebugLog("account switch: profile=%s", os.Getenv("WA_DESK_PROFILE_UUID"))

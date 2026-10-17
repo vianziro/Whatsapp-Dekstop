@@ -115,15 +115,50 @@ cat << EOF > "${CONTENTS_DIR}/Info.plist"
 </plist>
 EOF
 
-echo "Code signing ${BUNDLE_DIR} (ad-hoc, hardened runtime)..."
+echo "Code signing ${BUNDLE_DIR} (hardened runtime)..."
 xattr -cr "${BUNDLE_DIR}" 2>/dev/null || true
 if command -v codesign >/dev/null 2>&1; then
-    if [ -f "WhatsAppDesk.entitlements" ]; then
-        codesign --force --deep -s - --options runtime --entitlements WhatsAppDesk.entitlements "${BUNDLE_DIR}"
+    if [ -n "${WA_MAC_SIGN_IDENTITY:-}" ]; then
+        if [ -f "WhatsAppDesk.entitlements" ]; then
+            codesign --force --deep --timestamp --options runtime --entitlements WhatsAppDesk.entitlements \
+                --sign "${WA_MAC_SIGN_IDENTITY}" "${BUNDLE_DIR}"
+        else
+            codesign --force --deep --timestamp --options runtime --sign "${WA_MAC_SIGN_IDENTITY}" "${BUNDLE_DIR}"
+        fi
     else
-        codesign --force --deep -s - --options runtime "${BUNDLE_DIR}"
+        if [ -f "WhatsAppDesk.entitlements" ]; then
+            codesign --force --deep --options runtime --entitlements WhatsAppDesk.entitlements -s - "${BUNDLE_DIR}"
+        else
+            codesign --force --deep --options runtime -s - "${BUNDLE_DIR}"
+        fi
+        echo "Notice: ad-hoc signature only; Gatekeeper notarization requires WA_MAC_SIGN_IDENTITY."
     fi
-    echo "Bundle successfully signed."
+    codesign --verify --deep --strict --verbose=2 "${BUNDLE_DIR}"
+    echo "Bundle signature verified."
+else
+    echo "ERROR: codesign is required to package a macOS application." >&2
+    exit 1
+fi
+
+if [ -n "${WA_MAC_NOTARY_PROFILE:-}" ]; then
+    if [ -z "${WA_MAC_SIGN_IDENTITY:-}" ]; then
+        echo "ERROR: notarization requires WA_MAC_SIGN_IDENTITY." >&2
+        exit 1
+    fi
+    if ! command -v xcrun >/dev/null 2>&1; then
+        echo "ERROR: xcrun is required for notarization." >&2
+        exit 1
+    fi
+    NOTARY_ZIP="${BUNDLE_DIR}.notary.zip"
+    rm -f "${NOTARY_ZIP}"
+    ditto -c -k --keepParent "${BUNDLE_DIR}" "${NOTARY_ZIP}"
+    xcrun notarytool submit "${NOTARY_ZIP}" --keychain-profile "${WA_MAC_NOTARY_PROFILE}" --wait
+    xcrun stapler staple "${BUNDLE_DIR}"
+    xcrun stapler validate "${BUNDLE_DIR}"
+    rm -f "${NOTARY_ZIP}"
+    echo "Notarization ticket stapled and verified."
+elif [ -n "${WA_MAC_SIGN_IDENTITY:-}" ]; then
+    echo "Notice: Developer ID signed, but not notarized (WA_MAC_NOTARY_PROFILE is not configured)."
 fi
 
 if command -v hdiutil >/dev/null 2>&1; then

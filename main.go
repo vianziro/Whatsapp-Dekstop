@@ -3936,6 +3936,36 @@ func getInitScript(ua string) string {
 					   ext.endsWith('.rtf');
 			}
 
+			// Stream blobs across the native bridge in bounded chunks. Passing one
+			// data URL for a large video duplicated the entire payload in WebKit/
+			// WebView2, the bridge, and Go, commonly ending in a failed or 0-byte save.
+			function saveBlobChunked(blob, filename) {
+				var id = 'dl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+				var chunkSize = 256 * 1024;
+				if (!window.beginChunkedDownloadNative || !window.appendDownloadChunkNative || !window.finishChunkedDownloadNative) {
+					return Promise.reject(new Error('chunked download bridge unavailable'));
+				}
+				return window.beginChunkedDownloadNative(id, filename).then(function(ok) {
+					if (!ok) throw new Error('could not start download');
+					function sendChunk(offset) {
+						if (offset >= blob.size) return window.finishChunkedDownloadNative(id);
+						return blob.slice(offset, Math.min(offset + chunkSize, blob.size)).arrayBuffer().then(function(buffer) {
+							var bytes = new Uint8Array(buffer);
+							var binary = '';
+						for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+						return window.appendDownloadChunkNative(id, btoa(binary)).then(function(accepted) {
+							if (!accepted) throw new Error('native side rejected a download chunk');
+							return sendChunk(offset + bytes.length);
+						});
+					});
+				}
+				return sendChunk(0);
+				}).catch(function(err) {
+					if (window.abortChunkedDownloadNative) window.abortChunkedDownloadNative(id);
+					throw err;
+				});
+			}
+
 			function captureDownload(href, filename, shouldAutoOpen) {
 				filename = resolveDownloadFilename(filename, '');
 				var isDoc = isDocumentFileName(filename);
@@ -3961,11 +3991,7 @@ func getInitScript(ua string) string {
 						var isPdf = filename.toLowerCase().endsWith('.pdf');
 						var previewBlob = isPdf ? blob.slice(0, blob.size, 'application/pdf') : blob;
 						var ownedBlobUrl = isPdf ? origCreateObjectURL(previewBlob) : '';
-						var reader = new FileReader();
-						reader.onloadend = function() {
-							var base64data = reader.result;
-							if (window.saveDownloadedFileNative) {
-								window.saveDownloadedFileNative(filename, base64data).then(function(savedPath) {
+						saveBlobChunked(blob, filename).then(function(savedPath) {
 									if (savedPath) {
 										var alreadySaved = savedDownloadPaths[savedPath] === true;
 										savedDownloadPaths[savedPath] = true;
@@ -3975,7 +4001,7 @@ func getInitScript(ua string) string {
 										// Saying nothing would hide where the file actually is.
 										var relocated = window.getLastDownloadIssueNative ? window.getLastDownloadIssueNative() : '';
 										if (shouldAutoOpen) {
-											showInAppDocModal(filename, ownedBlobUrl || href, savedPath, base64data, ownedBlobUrl);
+										showInAppDocModal(filename, ownedBlobUrl || href, savedPath, '', ownedBlobUrl);
 											if (window.dismissStuckViewer) window.dismissStuckViewer();
 											showFloatingToast(relocated ? ('📄 Preview opened, saved to the default folder: ' + filename)
 												: (alreadySaved ? ('📄 Already saved: ' + filename) : ('📄 Preview opened: ' + filename)), openFolderAction());
@@ -3992,21 +4018,13 @@ func getInitScript(ua string) string {
 										showFloatingToast('❌ Failed to save file.' + (reason ? (' — ' + reason) : ''));
 										releaseDownloadRequest(requestKey);
 									}
-								}).catch(function() {
+								}).catch(function(err) {
 									if (ownedBlobUrl) URL.revokeObjectURL(ownedBlobUrl);
-									showFloatingToast('❌ Error saving file.');
+									var reason = window.getLastDownloadIssueNative ? window.getLastDownloadIssueNative() : '';
+									waDiag('download', 'chunked save failed for ' + filename + ': ' + String(err));
+									showFloatingToast('❌ Error saving file.' + (reason ? (' — ' + reason) : ''));
 									releaseDownloadRequest(requestKey);
 								});
-							} else {
-								if (ownedBlobUrl) URL.revokeObjectURL(ownedBlobUrl);
-								releaseDownloadRequest(requestKey);
-							}
-						};
-						reader.onerror = function() {
-							if (ownedBlobUrl) URL.revokeObjectURL(ownedBlobUrl);
-							releaseDownloadRequest(requestKey);
-						};
-						reader.readAsDataURL(blob);
 					})
 					.catch(function(err) {
 						console.error('Download intercept fetch error:', err);

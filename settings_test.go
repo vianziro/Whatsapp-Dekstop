@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -428,5 +429,88 @@ func TestSaveDownloadedFileReportsWhyItFailed(t *testing.T) {
 	}
 	if issue := getLastDownloadIssue(); issue != "" {
 		t.Errorf("a clean save must clear the issue, got %q", issue)
+	}
+}
+
+func TestChunkedDownloadRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	downloadDir := filepath.Join(home, "Downloads", "WhatsApp Downloads")
+	if err := saveSettings(&AppSettings{DownloadDir: downloadDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	const id = "chunk-round-trip"
+	payload := bytes.Repeat([]byte("whatsapp-large-attachment-"), 24000)
+	if !beginChunkedDownload(id, "video.mp4") {
+		t.Fatal("beginChunkedDownload failed")
+	}
+	for offset := 0; offset < len(payload); {
+		end := offset + 192*1024
+		if end > len(payload) {
+			end = len(payload)
+		}
+		encoded := base64.StdEncoding.EncodeToString(payload[offset:end])
+		if !appendDownloadChunk(id, encoded) {
+			t.Fatalf("appendDownloadChunk failed at offset %d", offset)
+		}
+		offset = end
+	}
+	path := finishChunkedDownload(id)
+	if path == "" {
+		t.Fatalf("finishChunkedDownload failed: %s", getLastDownloadIssue())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("saved payload differs: got %d bytes, want %d", len(got), len(payload))
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+		t.Fatalf("saved download is missing or empty: info=%v err=%v", fi, err)
+	}
+
+	const duplicateID = "chunk-round-trip-duplicate"
+	if !beginChunkedDownload(duplicateID, "video.mp4") {
+		t.Fatal("beginChunkedDownload for duplicate failed")
+	}
+	for offset := 0; offset < len(payload); {
+		end := offset + 192*1024
+		if end > len(payload) {
+			end = len(payload)
+		}
+		if !appendDownloadChunk(duplicateID, base64.StdEncoding.EncodeToString(payload[offset:end])) {
+			t.Fatalf("append duplicate chunk failed at offset %d", offset)
+		}
+		offset = end
+	}
+	if duplicatePath := finishChunkedDownload(duplicateID); duplicatePath != path {
+		t.Fatalf("identical download path = %q, want existing %q", duplicatePath, path)
+	}
+	entries, err := os.ReadDir(downloadDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("duplicate content created %d files, want exactly one", len(entries))
+	}
+}
+
+func TestChunkedDownloadRejectsInvalidChunkAndCanAbort(t *testing.T) {
+	const id = "chunk-abort"
+	if !beginChunkedDownload(id, "discard.bin") {
+		t.Fatal("beginChunkedDownload failed")
+	}
+	if appendDownloadChunk(id, "not base64!") {
+		t.Fatal("invalid base64 chunk was accepted")
+	}
+	chunkedDownloads.Lock()
+	stagedPath := chunkedDownloads.items[id].path
+	chunkedDownloads.Unlock()
+	abortChunkedDownload(id)
+	if _, err := os.Stat(stagedPath); !os.IsNotExist(err) {
+		t.Fatalf("abort left staged file behind: %v", err)
 	}
 }

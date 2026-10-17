@@ -73,7 +73,8 @@ func TestDownloadInterceptorCoalescesDuplicateRequests(t *testing.T) {
 func TestExistingDownloadsAreDeduplicatedByContent(t *testing.T) {
 	script := getInitScript("test-agent")
 	for _, want := range []string{
-		"window.saveDownloadedFileNative(filename, base64data)",
+		"function saveBlobChunked(blob, filename)",
+		"window.finishChunkedDownloadNative(id)",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("content-based download reuse is missing %q", want)
@@ -1516,6 +1517,35 @@ func TestDownloadFailureExplainsItself(t *testing.T) {
 	// reported as an ordinary success.
 	if !strings.Contains(page, "Saved to the default folder") {
 		t.Fatal("a fallback save must say so instead of looking like a normal save")
+	}
+}
+
+func TestAttachmentDownloadsUseBoundedNativeChunks(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(source)
+	for _, required := range []string{
+		"function saveBlobChunked(blob, filename)",
+		"blob.slice(offset, Math.min(offset + chunkSize, blob.size)).arrayBuffer()",
+		"window.appendDownloadChunkNative(id, btoa(binary))",
+		"window.finishChunkedDownloadNative(id)",
+	} {
+		if !strings.Contains(page, required) {
+			t.Errorf("bounded download streaming is missing %q", required)
+		}
+	}
+	for _, platformFile := range []string{"app_windows.go", "app_darwin.go", "app_linux.go"} {
+		contents, err := os.ReadFile(platformFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, binding := range []string{"beginChunkedDownloadNative", "appendDownloadChunkNative", "finishChunkedDownloadNative", "abortChunkedDownloadNative"} {
+			if !strings.Contains(string(contents), binding) {
+				t.Errorf("%s does not bind %s", platformFile, binding)
+			}
+		}
 	}
 }
 

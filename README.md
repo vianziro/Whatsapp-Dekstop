@@ -40,7 +40,7 @@ Get the latest stable release for your operating system (updated automatically):
 
 ## Key Features
 
-* **Two Accounts, One Window:** Link a second WhatsApp account with a fully isolated browser profile and switch from the account dock (`Ctrl+Shift+1/2` / `Cmd+Shift+1/2`) — with per-account unread badges and a seamless, blink-free swap. One live engine at a time keeps memory low.
+* **Two Accounts, One Window:** Link up to two WhatsApp accounts with fully isolated browser profiles and switch from the account dock (`Ctrl+Shift+1/2` / `Cmd+Shift+1/2`), with per-account unread badges. Only one web engine stays live at a time to keep memory low; switching replaces the active view and may briefly show its transition screen rather than keeping two WhatsApp engines resident.
 * **Ultra-Lightweight Engine:** Built directly on native OS webviews (WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux) instead of bundling a whole browser, so the app's own process stays around 100 MB.
 * **Frees Memory While Hidden (macOS):** WhatsApp Web keeps every image and video it has displayed alive in the renderer, which reaches a couple of gigabytes over a long session. Once the window has been off screen for 15 minutes the page reloads and that memory comes back — only while hidden, at most every 30 minutes, and never during an upload or an open preview. Toggle it under Settings → Maintenance.
 * **Zero Telemetry & Private by Design:** Communicates straight with `https://web.whatsapp.com`. No analytics tracking, no user profiling, and no proxy or relay servers.
@@ -205,6 +205,11 @@ re-downloads an artifact to verify its digest.
 
 Individual targets are also available: `build_mac.sh`, `build_windows_installer.sh`,
 and `build_linux.sh` (Linux packaging is currently maintained separately).
+Optional Authenticode signing and macOS Developer ID signing/notarization are
+configured with protected certificates and credentials; see
+[docs/RELEASE_SIGNING.md](docs/RELEASE_SIGNING.md).
+Maintainers investigating the macOS microphone report can use the reversible
+[Safari user-agent A/B test](docs/MACOS_MIC_DIAGNOSTICS.md).
 
 The `Release` workflow in `.github/workflows/build.yml` is manual-only for this
 reason; its job definitions are kept for use on a host with working runners.

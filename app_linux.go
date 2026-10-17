@@ -885,6 +885,10 @@ func runApp() {
 			}
 			return path
 		})
+		_ = w.Bind("beginChunkedDownloadNative", beginChunkedDownload)
+		_ = w.Bind("appendDownloadChunkNative", appendDownloadChunk)
+		_ = w.Bind("finishChunkedDownloadNative", finishChunkedDownload)
+		_ = w.Bind("abortChunkedDownloadNative", abortChunkedDownload)
 
 		// Why the last save did not go exactly as asked: the error, or a note
 		// that the file went to the default folder instead (#68).

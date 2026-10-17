@@ -41,6 +41,8 @@ fi
 go build -ldflags="-H windowsgui -X main.appVersion=${VERSION}" \
   -trimpath -o "$OUT" .
 
+bash sign_windows_artifact.sh "$OUT"
+
 echo "built: $OUT (CGO_ENABLED=$CGO_ENABLED)"
 ls -la "$OUT"
 file "$OUT"

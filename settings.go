@@ -18,6 +18,200 @@ import (
 
 var downloadFileMu sync.Mutex
 
+type chunkedDownload struct {
+	file     *os.File
+	path     string
+	filename string
+	size     int64
+}
+
+var chunkedDownloads = struct {
+	sync.Mutex
+	items map[string]*chunkedDownload
+}{items: make(map[string]*chunkedDownload)}
+
+const maxDownloadChunkBytes = 512 << 10
+
+// beginChunkedDownload creates a temporary staging file. The bridge sends only
+// bounded base64 chunks, so large attachments never need to coexist in JS and
+// Go memory as complete copies.
+func beginChunkedDownload(id, filename string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	filename = sanitizeDownloadFilename(filepath.Base(filepath.Clean(filename)))
+	f, err := os.CreateTemp("", "whatsapp-download-*.part")
+	if err != nil {
+		recordDownloadIssue(fmt.Sprintf("could not create temporary download: %v", err))
+		return false
+	}
+	chunkedDownloads.Lock()
+	defer chunkedDownloads.Unlock()
+	if len(chunkedDownloads.items) >= 8 {
+		f.Close()
+		os.Remove(f.Name())
+		return false
+	}
+	if _, exists := chunkedDownloads.items[id]; exists {
+		f.Close()
+		os.Remove(f.Name())
+		return false
+	}
+	chunkedDownloads.items[id] = &chunkedDownload{file: f, path: f.Name(), filename: filename}
+	return true
+}
+
+func appendDownloadChunk(id, encoded string) bool {
+	if len(encoded) > base64.StdEncoding.EncodedLen(maxDownloadChunkBytes) {
+		return false
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) > maxDownloadChunkBytes {
+		return false
+	}
+	chunkedDownloads.Lock()
+	defer chunkedDownloads.Unlock()
+	d := chunkedDownloads.items[id]
+	if d == nil || d.size+int64(len(data)) > maxAttachmentBytes {
+		return false
+	}
+	if _, err := d.file.Write(data); err != nil {
+		return false
+	}
+	d.size += int64(len(data))
+	return true
+}
+
+func abortChunkedDownload(id string) {
+	chunkedDownloads.Lock()
+	d := chunkedDownloads.items[id]
+	delete(chunkedDownloads.items, id)
+	chunkedDownloads.Unlock()
+	if d != nil {
+		_ = d.file.Close()
+		_ = os.Remove(d.path)
+	}
+}
+
+func finishChunkedDownload(id string) string {
+	chunkedDownloads.Lock()
+	d := chunkedDownloads.items[id]
+	delete(chunkedDownloads.items, id)
+	chunkedDownloads.Unlock()
+	if d == nil {
+		recordDownloadIssue("download session expired or was not found")
+		return ""
+	}
+	defer os.Remove(d.path)
+	if err := d.file.Sync(); err != nil {
+		_ = d.file.Close()
+		recordDownloadIssue(fmt.Sprintf("could not flush temporary download: %v", err))
+		return ""
+	}
+	if err := d.file.Close(); err != nil {
+		recordDownloadIssue(fmt.Sprintf("could not close temporary download: %v", err))
+		return ""
+	}
+	if d.size == 0 {
+		recordDownloadIssue("download was empty; refusing to save a 0-byte file")
+		return ""
+	}
+	settings := loadSettings()
+	dir := settings.DownloadDir
+	if settings.OrganizeByMonth {
+		dir = filepath.Join(dir, time.Now().Format("2006-01"))
+	}
+	path, err := moveChunkedDownload(d.path, dir, d.filename)
+	if err != nil {
+		fallback := getDefaultDownloadDir()
+		if settings.OrganizeByMonth {
+			fallback = filepath.Join(fallback, time.Now().Format("2006-01"))
+		}
+		if filepath.Clean(fallback) != filepath.Clean(dir) {
+			path, err = moveChunkedDownload(d.path, fallback, d.filename)
+			if err == nil {
+				recordDownloadIssue(fmt.Sprintf("saved to %s because configured folder could not be used", fallback))
+				return path
+			}
+		}
+		recordDownloadIssue(fmt.Sprintf("failed to save download: %v", err))
+		return ""
+	}
+	recordDownloadIssue("")
+	return path
+}
+
+func moveChunkedDownload(source, targetDir, filename string) (string, error) {
+	if err := validateDownloadDir(targetDir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+	filename = sanitizeDownloadFilename(filename)
+	sourceFile, err := os.Open(source)
+	if err != nil {
+		return "", err
+	}
+	defer sourceFile.Close()
+	info, err := sourceFile.Stat()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, sourceFile); err != nil {
+		return "", err
+	}
+	var expected [sha256.Size]byte
+	copy(expected[:], h.Sum(nil))
+	if _, err := sourceFile.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	for n := 0; ; n++ {
+		name := filename
+		if n > 0 {
+			name = fmt.Sprintf("%s (%d)%s", base, n, ext)
+		}
+		target := filepath.Join(targetDir, name)
+		if existing, err := os.Open(target); err == nil {
+			st, statErr := existing.Stat()
+			existingHash := sha256.New()
+			_, hashErr := io.Copy(existingHash, existing)
+			existing.Close()
+			if statErr == nil && hashErr == nil && !st.IsDir() && st.Size() == info.Size() && bytes.Equal(existingHash.Sum(nil), expected[:]) {
+				return target, nil
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := sourceFile.Seek(0, io.SeekStart); err != nil {
+			out.Close()
+			_ = os.Remove(target)
+			return "", err
+		}
+		_, copyErr := io.Copy(out, sourceFile)
+		closeErr := out.Close()
+		if copyErr != nil || closeErr != nil {
+			_ = os.Remove(target)
+			if copyErr != nil {
+				return "", copyErr
+			}
+			return "", closeErr
+		}
+		return target, nil
+	}
+}
+
 // downloadIssue records why the most recent attachment save did not go exactly
 // as asked. The page used to be told only "it failed" (an empty path), which is
 // how #68 became unreportable: the user saw "Failed to save file." with nothing

@@ -51,11 +51,42 @@ jobs:
   macos:
     needs: prepare
     runs-on: macos-latest
+    env:
+      MACOS_SIGNING_CERT_BASE64: ${{ secrets.MACOS_SIGNING_CERT_BASE64 }}
+      MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: Install optional Developer ID certificate
+        if: ${{ env.MACOS_SIGNING_CERT_BASE64 != '' && env.MACOS_SIGNING_CERT_PASSWORD != '' && env.MACOS_SIGNING_IDENTITY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/whatsapp-desk-signing.p12"
+          KEYCHAIN="$RUNNER_TEMP/whatsapp-desk-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          printf '%s' "$MACOS_SIGNING_CERT_BASE64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" -P "$MACOS_SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "WA_MAC_SIGN_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+      - name: Store optional notarization credentials
+        if: ${{ env.MACOS_SIGNING_CERT_BASE64 != '' && env.MACOS_SIGNING_CERT_PASSWORD != '' && env.MACOS_SIGNING_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' }}
+        shell: bash
+        run: |
+          xcrun notarytool store-credentials WhatsAppDeskNotary \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+          echo "WA_MAC_NOTARY_PROFILE=WhatsAppDeskNotary" >> "$GITHUB_ENV"
       - name: Build macOS bundle
         run: bash build_mac.sh "${{ needs.prepare.outputs.version }}"
       - uses: actions/upload-artifact@v4
@@ -68,13 +99,24 @@ jobs:
   windows:
     needs: prepare
     runs-on: windows-latest
+    env:
+      WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: Install optional Authenticode certificate
+        if: ${{ env.WINDOWS_SIGNING_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $cert = Join-Path $env:RUNNER_TEMP 'whatsapp-desk-signing.pfx'
+          [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_BASE64))
+          "WA_WINDOWS_SIGN_CERT=$($cert -replace '\\', '/')" >> $env:GITHUB_ENV
       - name: Build Windows binary and installer
         shell: bash
+        env:
+          WA_WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
         run: bash build.sh windows "${{ needs.prepare.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:

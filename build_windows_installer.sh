@@ -34,5 +34,6 @@ WA_DESK_VERSION="$VERSION" "$PYTHON_BIN" installer/windows/make_wizard_assets.py
 echo "== 3/3 compiling installer =="
 makensis -DVERSION="$VERSION" -DAPPEXE_PATH="../../dist_win/WhatsAppDesk.exe" \
   installer/windows/WhatsAppDesk.nsi
+bash sign_windows_artifact.sh "WhatsApp-Desk-Windows-x64-Setup.exe"
 
 ls -la WhatsApp-Desk-Windows-x64-Setup.exe dist_win/WhatsAppDesk.exe
