@@ -312,6 +312,9 @@ func initWindowsProcessProtection() {
 		"--disable-domain-reliability",
 		"--disable-sync",
 	}
+	// User-configured SOCKS5/HTTP proxy (#84). WebView2 reads these switches
+	// when the browser process starts, so a change applies on next launch.
+	browserArgs = append(browserArgs, proxyBrowserArgs(loadSettings().Proxy)...)
 	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", strings.Join(browserArgs, " "))
 }
 
@@ -781,6 +784,7 @@ func runApp() {
 			// transient read failure showed the OTHER account's session. Log
 			// it loudly so wa_debug.log can explain a wrong-profile startup.
 			cacheDebugLog("account profile unavailable (%v); falling back to the legacy user-data dir", dataDirErr)
+			noteSessionEvent("account registry unreadable (%v); started on the legacy user-data dir", dataDirErr)
 			dataDir = userDataDir
 		}
 
@@ -857,13 +861,14 @@ func runApp() {
 
 		// Bind native notification bridge
 		_ = w.Bind("sendNativeNotification", func(title, body string) {
-			go showNativeNotification(title, body, iconFullPath, executablePath)
+			go func() { showNativeNotification(labelNotificationTitle(title), body, iconFullPath, executablePath) }()
 		})
 		_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
 		_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
 
 		// Page-side diagnostics (drag & drop, document preview, switch steps).
 		_ = w.Bind("waDiagNative", diagLogFromPage)
+		_ = w.Bind("reportSessionStateNative", recordSessionState)
 
 		_ = w.Bind("releaseMemoryNative", func() {
 			// Note: do NOT call w.Suspend() here. The webview2 vendor library already
@@ -876,13 +881,17 @@ func runApp() {
 			curProc, _, _ := procGetCurrentProcess.Call()
 			procSetProcessWorkingSetSize.Call(curProc, ^uintptr(0), ^uintptr(0))
 			debugLogProcessStats("release-memory")
+			// The LIVE engine's profile, i.e. the active account's. This used
+			// the legacy userDataDir, so with the second account active the
+			// runtime trim measured and purged the first account's idle cache
+			// and never capped the cache that was actually growing.
 			enforceDiskCacheCapFrom(
-				[]string{filepath.Join(userDataDir, "EBWebView")},
+				[]string{filepath.Join(dataDir, "EBWebView")},
 				[]string{
-					filepath.Join(userDataDir, "EBWebView", "Default", "Cache"),
-					filepath.Join(userDataDir, "EBWebView", "Default", "GPUCache"),
-					filepath.Join(userDataDir, "EBWebView", "Default", "Code Cache"),
-					filepath.Join(userDataDir, "EBWebView", "Default", "Service Worker"),
+					filepath.Join(dataDir, "EBWebView", "Default", "Cache"),
+					filepath.Join(dataDir, "EBWebView", "Default", "GPUCache"),
+					filepath.Join(dataDir, "EBWebView", "Default", "Code Cache"),
+					filepath.Join(dataDir, "EBWebView", "Default", "Service Worker"),
 				},
 				"minimize",
 			)
@@ -890,7 +899,7 @@ func runApp() {
 
 		// Bind external link handler to open links in default Windows browser
 		_ = w.Bind("openExternalLink", func(rawURL string) {
-			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+			if isSafeExternalURL(rawURL) {
 				go func() {
 					_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
 				}()
@@ -1070,16 +1079,33 @@ func runApp() {
 			}
 			return map[string]any{"id": account.ID, "label": account.Label}
 		})
+		_ = w.Bind("getProxyNative", func() map[string]any {
+			return map[string]any{"proxy": getProxySetting(), "supported": true}
+		})
+		_ = w.Bind("setProxyNative", setProxySetting)
+		_ = w.Bind("removeAccountNative", func(id string) map[string]any {
+			account, err := removeAccount(id)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
 		_ = w.Bind("requestAccountSwitchNative", func(id, lastUnread string) bool {
-			if switchRequested || isActiveAccount(id) {
+			if switchRequested {
 				return false
 			}
-			// Snapshot the outgoing account's unread badge before flipping the
-			// registry, so the dock can hint "unread when last seen" on the chip.
-			_ = setLastUnreadForActiveAccount(lastUnread)
-			if setActiveAccount(id) != nil {
+			// One locked registry update: snapshot the outgoing account's
+			// unread badge (the dock hints "unread when last seen" on its chip)
+			// and flip the active account together.
+			changed, err := switchActiveAccount(id, lastUnread)
+			if err != nil {
+				cacheDebugLog("account switch failed: %v", err)
 				return false
 			}
+			if !changed {
+				return false
+			}
+			cacheDebugLog("account switch requested: %s", id)
 			switchRequested = true
 			// End the session only after this bridge call has returned; the next
 			// loop iteration destroys this engine and builds the new one.

@@ -817,7 +817,7 @@ func runApp() {
 
 		// Bind native notification bridge
 		_ = w.Bind("sendNativeNotification", func(title, body string) {
-			go showNativeNotification(title, body, iconPath)
+			go func() { showNativeNotification(labelNotificationTitle(title), body, iconPath) }()
 		})
 		_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
 		_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
@@ -830,10 +830,11 @@ func runApp() {
 
 		// Page-side diagnostics (drag & drop, document preview, switch steps).
 		_ = w.Bind("waDiagNative", diagLogFromPage)
+		_ = w.Bind("reportSessionStateNative", recordSessionState)
 
 		// Bind external link handler (xdg-open)
 		_ = w.Bind("openExternalLink", func(rawURL string) {
-			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+			if isSafeExternalURL(rawURL) {
 				go func() {
 					_ = exec.Command("xdg-open", rawURL).Start()
 				}()
@@ -1019,21 +1020,32 @@ func runApp() {
 			}
 			return map[string]any{"id": account.ID, "label": account.Label}
 		})
-		_ = w.Bind("requestAccountSwitchNative", func(id, lastUnread string) bool {
-			if switchRequested || isActiveAccount(id) {
-				return false
+		_ = w.Bind("removeAccountNative", func(id string) map[string]any {
+			account, err := removeAccount(id)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
 			}
-			// Snapshot the outgoing account's unread badge before flipping the
-			// registry, so the dock can hint "unread when last seen" on the chip.
-			_ = setLastUnreadForActiveAccount(lastUnread)
-			if setActiveAccount(id) != nil {
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
+		_ = w.Bind("requestAccountSwitchNative", func(id, lastUnread string) bool {
+			if switchRequested {
 				return false
 			}
 			// Serialized: a second request arriving while a swap is in flight is
-			// dropped rather than racing the one already queued.
+			// dropped rather than racing the one already queued. The slot is
+			// taken before the registry is touched, so a dropped request never
+			// leaves accounts.json naming an account that is not on screen.
 			select {
 			case switchMu <- struct{}{}:
 			default:
+				return false
+			}
+			changed, err := switchActiveAccount(id, lastUnread)
+			if err != nil || !changed {
+				<-switchMu
+				if err != nil {
+					cacheDebugLog("account switch failed: %v", err)
+				}
 				return false
 			}
 			// Deferred to the next main-loop turn instead of running inline: this

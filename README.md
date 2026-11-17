@@ -40,7 +40,7 @@ Get the latest stable release for your operating system (updated automatically):
 
 ## Key Features
 
-* **Two Accounts, One Window:** Link up to two WhatsApp accounts with fully isolated browser profiles and switch from the account dock (`Ctrl+Shift+1/2` / `Cmd+Shift+1/2`), with per-account unread badges. Only one web engine stays live at a time to keep memory low; switching replaces the active view and may briefly show its transition screen rather than keeping two WhatsApp engines resident.
+* **Two Accounts, One Window:** Link up to two WhatsApp accounts with fully isolated browser profiles and switch from the account dock (`Ctrl+Shift+1/2` / `Cmd+Shift+1/2`), with per-account unread badges. Right-click an account to rename or remove it, and notifications name the account they came from. Only one web engine stays live at a time to keep memory low; switching replaces the active view and may briefly show its transition screen rather than keeping two WhatsApp engines resident. As a consequence, the inactive account receives no messages or notifications until you switch to it.
 * **Ultra-Lightweight Engine:** Built directly on native OS webviews (WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux) instead of bundling a whole browser, so the app's own process stays around 100 MB.
 * **Frees Memory While Hidden (macOS):** WhatsApp Web keeps every image and video it has displayed alive in the renderer, which reaches a couple of gigabytes over a long session. Once the window has been off screen for 15 minutes the page reloads and that memory comes back — only while hidden, at most every 30 minutes, and never during an upload or an open preview. Toggle it under Settings → Maintenance.
 * **Zero Telemetry & Private by Design:** Communicates straight with `https://web.whatsapp.com`. No analytics tracking, no user profiling, and no proxy or relay servers.
@@ -50,6 +50,7 @@ Get the latest stable release for your operating system (updated automatically):
 * **Keeps Running in the Tray (Windows):** Closing the window hides it instead of quitting, so messages and notifications keep arriving; right-click the tray icon to reopen or quit. macOS and Linux already kept a status-bar item.
 * **Unified Settings & Module Guard:** Single accessible settings control (`Ctrl+,` / `Cmd+,`) protected by runtime module isolation (`waRunModule`) against unexpected DOM changes.
 * **Built-in Self Updater:** Automatic update notifications with cryptographic `SHA256SUMS` validation before applying updates.
+* **Network Proxy:** Route WhatsApp through a SOCKS5 or HTTP proxy from Settings → Network proxy (Windows; macOS 14+). Takes effect after a restart.
 * **Per-Monitor Window Memory:** Automatically remembers window position and dimension across multi-monitor setups.
 
 ---
@@ -86,6 +87,10 @@ Get the latest stable release for your operating system (updated automatically):
 ## Installation & Setup
 
 ### macOS (Universal)
+> [!TIP]
+> **Seeing "WhatsApp Desk wants to use your confidential information stored in 'WhatsApp Desk WebCrypto Master Key'"?**
+> That key encrypts your WhatsApp session. Enter your Mac login password and click **Always Allow** — clicking *Deny* leaves WhatsApp unable to read its session ("A database error occurred… relink your device"). If you build the app yourself, run `bash make_mac_signing_identity.sh` once so later builds keep the same signature and macOS stops asking.
+
 1. Download [**WhatsApp-Desk-macOS-Universal.dmg**](https://github.com/vianziro/Whatsapp-Dekstop/releases/latest/download/WhatsApp-Desk-macOS-Universal.dmg).
 2. Open the DMG and drag **WhatsApp Desk** into **Applications**.
 3. *First launch:* If macOS Gatekeeper alerts you, right-click the application and select **Open**.

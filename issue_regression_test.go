@@ -625,7 +625,64 @@ func TestAccountFallbackNeverHappensSilently(t *testing.T) {
 	if !strings.Contains(darwin, "auditAccountWebKitStore(profileID)") {
 		t.Error("the macOS engine loop no longer audits the account's WebKit store; an ephemeral-store fallback (always back to the QR page) would again be invisible unless WA_DESK_DEBUG was set at launch")
 	}
-	if !strings.Contains(darwin, "Library\", \"WebKit\", \"com.whatsapp.desk\", \"WebsiteDataStore\", profileID") {
-		t.Error("auditAccountWebKitStore no longer inspects ~/Library/WebKit/com.whatsapp.desk/WebsiteDataStore/<uuid>, so it would audit the wrong directory")
+	// The folder is named after the DASHED uuid even when the registry holds a
+	// legacy undashed id, so the audit must go through webKitStoreDirName; the
+	// raw id pointed at a folder that never exists and reported a healthy
+	// store as missing.
+	if !strings.Contains(darwin, "filepath.Join(root, webKitStoreDirName(profileID))") {
+		t.Error("auditAccountWebKitStore no longer resolves the store folder through webKitStoreDirName, so it would audit the wrong directory for legacy account ids")
+	}
+	accounts := readProjectFile(t, "accounts.go")
+	if !strings.Contains(accounts, "\"Library\", \"WebKit\", \"com.whatsapp.desk\", \"WebsiteDataStore\")") {
+		t.Error("accountWebKitStoreRoot no longer points at ~/Library/WebKit/com.whatsapp.desk/WebsiteDataStore")
+	}
+}
+
+// --- account dock: dead veil, swallowed refusals, missing remove ------------
+
+func TestAccountDockHandlesNativeRefusals(t *testing.T) {
+	src := readProjectFile(t, "main.go")
+	for _, want := range []string{
+		// Clicking the active chip must not raise the veil at all.
+		"if (account && account.active) return;",
+		// A declined switch takes the veil down again.
+		"if (accepted === false) {",
+		// { error } results reject instead of reading as success.
+		"value.error",
+		"toastBridgeError('Unable to create account.', err);",
+		"toastBridgeError('Unable to rename account.', err);",
+		// Remove is reachable, and the user is told inactive accounts are quiet.
+		"callBridge('removeAccountNative', [account.id])",
+		"button.oncontextmenu = function(e) {",
+		"Notifications paused until you switch to it",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("account dock lost %q", want)
+		}
+	}
+}
+
+func TestEveryPlatformBindsRemoveAndAtomicSwitch(t *testing.T) {
+	for _, file := range []string{"app_darwin.go", "app_windows.go", "app_linux.go"} {
+		src := readProjectFile(t, file)
+		if !strings.Contains(src, `w.Bind("removeAccountNative"`) {
+			t.Errorf("%s does not bind removeAccountNative", file)
+		}
+		if !strings.Contains(src, "switchActiveAccount(id, lastUnread)") {
+			t.Errorf("%s does not switch through the single atomic registry update", file)
+		}
+		if strings.Contains(src, "setActiveAccount(id)") {
+			t.Errorf("%s still flips the registry outside switchActiveAccount", file)
+		}
+	}
+	// macOS/Linux: the swap slot is claimed before the registry changes, so a
+	// dropped request can never leave accounts.json naming an off-screen account.
+	for _, file := range []string{"app_darwin.go", "app_linux.go"} {
+		src := readProjectFile(t, file)
+		slot := strings.Index(src, "case switchMu <- struct{}{}:")
+		flip := strings.Index(src, "switchActiveAccount(id, lastUnread)")
+		if slot < 0 || flip < 0 || slot > flip {
+			t.Errorf("%s must claim the swap slot before switching the registry", file)
+		}
 	}
 }

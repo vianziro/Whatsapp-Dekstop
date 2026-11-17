@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -254,6 +257,10 @@ type AppSettings struct {
 	// long-lived session, and purging its memory cache reclaims only ~6% of it
 	// -- a page load is the only thing that returns the rest.
 	IdleMemoryReload bool `json:"idle_memory_reload"`
+	// Proxy routes all WhatsApp traffic through a SOCKS5 or HTTP proxy
+	// ("socks5://host:port" / "http://host:port"); empty means direct. It is
+	// applied when the web engine starts, so a change needs a restart (#84).
+	Proxy string `json:"proxy,omitempty"`
 	// LastCrashNotified is the unix time of the crash log last surfaced to
 	// the user via the issue reporter, so the startup nudge fires once.
 	LastCrashNotified int64 `json:"last_crash_notified"`
@@ -878,6 +885,15 @@ func openFileInDefaultApp(filePath string) bool {
 	if _, err := os.Stat(filePath); err != nil {
 		return false
 	}
+	// A received attachment can be a program (#87): "invoice.pdf.exe", a
+	// .command script, an .app bundle. The bridge is reachable from any script
+	// on web.whatsapp.com, so it must never be a way to RUN one. Show it in
+	// the file manager instead; the user can still open it deliberately.
+	if isExecutableAttachment(filePath) {
+		cacheDebugLog("open: refusing to launch executable attachment %q; revealing it instead", filepath.Base(filePath))
+		revealInFileManager(filePath)
+		return false
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -893,4 +909,184 @@ func openFileInDefaultApp(filePath string) bool {
 		return true
 	}
 	return false
+}
+
+// executableAttachmentExts are file types that run code when "opened" on
+// macOS or Windows (plus the common Linux ones). Lowercase, with the dot.
+var executableAttachmentExts = map[string]bool{
+	// Windows
+	".exe": true, ".com": true, ".bat": true, ".cmd": true, ".msi": true, ".msp": true,
+	".scr": true, ".pif": true, ".cpl": true, ".hta": true, ".js": true, ".jse": true,
+	".vbs": true, ".vbe": true, ".wsf": true, ".wsh": true, ".ps1": true, ".psm1": true,
+	".lnk": true, ".url": true, ".reg": true, ".appref-ms": true, ".msc": true, ".jar": true,
+	// Windows: help/script components, app packages, shell and Office add-in
+	// launchers; plus Java Web Start and macOS Automator/System Settings panes.
+	".chm": true, ".sct": true, ".wsc": true, ".ws": true, ".vb": true, ".msix": true,
+	".msixbundle": true, ".appx": true, ".appxbundle": true, ".appinstaller": true,
+	".application": true, ".gadget": true, ".diagcab": true, ".settingcontent-ms": true,
+	".library-ms": true, ".search-ms": true, ".scf": true, ".iqy": true, ".xll": true,
+	".ps1xml": true, ".psd1": true, ".jnlp": true, ".action": true, ".prefpane": true,
+	// macOS
+	".app": true, ".command": true, ".tool": true, ".pkg": true, ".mpkg": true,
+	".workflow": true, ".scpt": true, ".scptd": true, ".applescript": true, ".terminal": true,
+	".webloc": true, ".inetloc": true, ".fileloc": true,
+	// Shells / interpreters / Linux launchers
+	".sh": true, ".bash": true, ".zsh": true, ".csh": true, ".ksh": true, ".fish": true,
+	".py": true, ".pl": true, ".rb": true, ".desktop": true, ".run": true, ".appimage": true,
+}
+
+// isExecutableAttachment reports whether opening path would run code. Windows
+// ignores trailing dots and spaces ("evil.exe." runs evil.exe), so those are
+// trimmed before the extension is read.
+func isExecutableAttachment(path string) bool {
+	trimmed := strings.TrimRight(strings.TrimSpace(path), ". /\\")
+	return executableAttachmentExts[strings.ToLower(filepath.Ext(trimmed))]
+}
+
+// revealInFileManager shows path in Finder / Explorer / the file manager
+// without opening it.
+func revealInFileManager(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", "-R", path)
+	case "windows":
+		cmd = exec.Command("explorer", filepath.Dir(path))
+	default:
+		cmd = exec.Command("xdg-open", filepath.Dir(path))
+	}
+	_ = cmd.Start()
+}
+
+// isSafeExternalURL gates openExternalLink, which any script on the page can
+// call (#87). Only absolute http(s) URLs with a host are handed to the OS:
+// no other schemes (file:, javascript:, custom app protocols that could
+// launch local handlers), no credentials, and no whitespace or control
+// characters that a shell-out (rundll32 / open / xdg-open) could misread.
+func isSafeExternalURL(raw string) bool {
+	if raw == "" || len(raw) > 8192 {
+		return false
+	}
+	for _, r := range raw {
+		if r <= 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	if u.Host == "" || u.User != nil || u.Opaque != "" {
+		return false
+	}
+	return true
+}
+
+// proxyHostPattern is deliberately narrow: the value ends up in a Chromium
+// command-line switch on Windows and in a Network.framework endpoint on
+// macOS, so anything beyond a hostname / IPv4 / IPv6 literal is refused.
+func isPlainProxyHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, r := range host {
+		ok := r == '.' || r == '-' || r == ':' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeProxyURL validates a user-entered proxy and returns its canonical
+// "scheme://host:port" form. "host:port" alone means SOCKS5. An empty value
+// is valid and means "no proxy". Errors are phrased for the settings panel.
+func normalizeProxyURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "socks5://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", errors.New("That proxy address is not valid. Example: socks5://127.0.0.1:1080")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "socks5" && scheme != "http" {
+		return "", errors.New("Use a socks5:// or http:// proxy.")
+	}
+	if u.User != nil {
+		return "", errors.New("Proxies that need a username and password are not supported yet.")
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return "", errors.New("Enter only the proxy address and port, e.g. socks5://127.0.0.1:1080")
+	}
+	host := u.Hostname()
+	if !isPlainProxyHost(host) {
+		return "", errors.New("That proxy host name is not valid.")
+	}
+	port := u.Port()
+	if port == "" {
+		return "", errors.New("Include the port, e.g. socks5://127.0.0.1:1080")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", errors.New("The proxy port must be between 1 and 65535.")
+	}
+	return scheme + "://" + u.Host, nil
+}
+
+// proxyParts splits a normalized proxy into what the native engines need.
+func proxyParts(normalized string) (scheme, host, port string, ok bool) {
+	u, err := url.Parse(normalized)
+	if err != nil || normalized == "" {
+		return "", "", "", false
+	}
+	return u.Scheme, u.Hostname(), u.Port(), true
+}
+
+func getProxySetting() string {
+	norm, err := normalizeProxyURL(loadSettings().Proxy)
+	if err != nil {
+		return ""
+	}
+	return norm
+}
+
+// setProxySetting saves a proxy (or clears it with ""), returning
+// {proxy, restart} on success or {error} for the settings panel.
+func setProxySetting(raw string) map[string]any {
+	norm, err := normalizeProxyURL(raw)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	s := loadSettings()
+	changed := s.Proxy != norm
+	s.Proxy = norm
+	if err := saveSettings(s); err != nil {
+		return map[string]any{"error": "Could not save the proxy setting."}
+	}
+	if changed {
+		if norm == "" {
+			cacheDebugLog("proxy: cleared (takes effect on restart)")
+		} else {
+			cacheDebugLog("proxy: set to %s (takes effect on restart)", norm)
+		}
+	}
+	return map[string]any{"proxy": norm, "restart": changed}
+}
+
+// proxyBrowserArgs are the Chromium switches for the saved proxy (WebView2).
+func proxyBrowserArgs(saved string) []string {
+	norm, err := normalizeProxyURL(saved)
+	if err != nil || norm == "" {
+		return nil
+	}
+	return []string{"--proxy-server=" + norm}
 }

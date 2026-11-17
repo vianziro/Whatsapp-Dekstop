@@ -1306,7 +1306,13 @@ func getInitScript(ua string) string {
 				if (savedPath && window.showPDFPreviewNative && isPdf) {
 					window.showPDFPreviewNative(savedPath);
 				} else if (savedPath && window.openFileNative) {
-					window.openFileNative(savedPath);
+					Promise.resolve(window.openFileNative(savedPath)).then(function(opened) {
+						// The native side refuses to RUN programs received in a chat and
+						// reveals them in their folder instead (#87); say why nothing ran.
+						if (opened === false && /\.(exe|com|bat|cmd|msi|msp|scr|pif|cpl|hta|js|jse|vbs|vbe|wsf|wsh|ps1|psm1|lnk|url|reg|appref-ms|msc|jar|chm|sct|wsc|ws|vb|msix|msixbundle|appx|appxbundle|appinstaller|application|gadget|diagcab|settingcontent-ms|library-ms|search-ms|scf|iqy|xll|ps1xml|psd1|jnlp|action|prefpane|app|command|tool|pkg|mpkg|workflow|scpt|scptd|applescript|terminal|webloc|inetloc|fileloc|sh|bash|zsh|csh|ksh|fish|py|pl|rb|desktop|run|appimage)[.\s]*$/i.test(String(savedPath)) && window.showFloatingToast) {
+							window.showFloatingToast('This file is a program, so it was shown in its folder instead of being run.');
+						}
+					}).catch(function() {});
 				} else if (window.previewDocumentNative) {
 					window.previewDocumentNative(filename, dataUri || blobUrl);
 				}
@@ -1375,17 +1381,183 @@ func getInitScript(ua string) string {
 				return xlsxLoadPromise;
 			}
 
+			// Spreadsheets arrive from any contact, and SheetJS has had parser
+			// CVEs (prototype pollution, ReDoS - #86). Parsing therefore runs in
+			// a dedicated Web Worker: a crafted file can neither pollute this
+			// page's prototypes nor reach window.*Native bridges, and a parser
+			// stuck in a pathological regex is terminated instead of freezing
+			// WhatsApp. The worker keeps the workbook and returns one sheet's
+			// HTML at a time, which still goes through sanitizeSheetHtml here.
+			// Only when the page refuses to create a worker at all (CSP, old
+			// engine) does the preview fall back to the in-page parser.
+			var XLSX_PREVIEW_MAX_ROWS = 5001;
+			var XLSX_WORKER_BOOT = '\n;(function(){var wb=null,book=0;' +
+				'self.onmessage=function(e){var m=e.data||{};try{' +
+				'if(m.op==="open"){wb=XLSX.read(m.b64,{type:"base64",cellDates:true,sheetRows:' + XLSX_PREVIEW_MAX_ROWS + '});book=m.id;' +
+				'self.postMessage({id:m.id,book:book,names:(wb.SheetNames||[]).slice(0,100)});}' +
+				'else if(m.op==="sheet"){if(!wb||m.book!==book||!wb.Sheets[m.name])throw new Error("sheet unavailable");' +
+				'self.postMessage({id:m.id,html:XLSX.utils.sheet_to_html(wb.Sheets[m.name],{id:"wa-xlsx-table"})});}' +
+				'}catch(err){self.postMessage({id:m.id,error:String(err&&err.message||err)});}};' +
+				'self.postMessage({ready:true});})();';
+			// These live per preview modal. closeDocModal disposes of the worker:
+			// without that, every spreadsheet opened left a worker alive holding
+			// SheetJS and the whole parsed workbook for the rest of the session.
+			var xlsxDisposed = false;
+			var xlsxWorker = null;
+			var xlsxWorkerPromise = null;
+			var xlsxRequestSeq = 0;
+			var xlsxPending = {};
+
+			function workerUnavailable(message) {
+				var err = new Error(message);
+				err.workerUnavailable = true;
+				return err;
+			}
+
+			function resetXlsxWorker(reason) {
+				if (xlsxWorker) {
+					try { xlsxWorker.terminate(); } catch (e) {}
+				}
+				xlsxWorker = null;
+				xlsxWorkerPromise = null;
+				Object.keys(xlsxPending).forEach(function(key) {
+					var pending = xlsxPending[key];
+					delete xlsxPending[key];
+					clearTimeout(pending.timer);
+					pending.reject(new Error(reason));
+				});
+			}
+
+			function getXlsxWorker() {
+				if (xlsxWorkerPromise) return xlsxWorkerPromise;
+				xlsxWorkerPromise = new Promise(function(resolve, reject) {
+					if (typeof Worker !== 'function' || typeof Blob !== 'function' || !window.URL || typeof URL.createObjectURL !== 'function' || !window.loadXLSXLibraryNative) {
+						reject(workerUnavailable('worker unavailable'));
+						return;
+					}
+					Promise.resolve(window.loadXLSXLibraryNative()).then(function(jsCode) {
+						var url = null;
+						var worker = null;
+						try {
+							url = URL.createObjectURL(new Blob([String(jsCode || ''), XLSX_WORKER_BOOT], { type: 'text/javascript' }));
+							worker = new Worker(url);
+						} catch (e) {
+							if (url) URL.revokeObjectURL(url);
+							reject(workerUnavailable('worker blocked: ' + (e && e.message)));
+							return;
+						}
+						var started = false;
+						function failStart(why) {
+							if (started) return;
+							started = true;
+							clearTimeout(startTimer);
+							URL.revokeObjectURL(url);
+							try { worker.terminate(); } catch (e) {}
+							reject(workerUnavailable(why));
+						}
+						var startTimer = setTimeout(function() { failStart('worker did not start'); }, 4000);
+						worker.onmessage = function(ev) {
+							var msg = ev.data || {};
+							if (msg.ready) {
+								if (started) return;
+								started = true;
+								clearTimeout(startTimer);
+								URL.revokeObjectURL(url);
+								if (xlsxDisposed) {
+									// The preview was closed while the worker booted.
+									try { worker.terminate(); } catch (e) {}
+									reject(new Error('preview closed'));
+									return;
+								}
+								xlsxWorker = worker;
+								resolve(worker);
+								return;
+							}
+							var pending = xlsxPending[msg.id];
+							if (!pending) return;
+							delete xlsxPending[msg.id];
+							clearTimeout(pending.timer);
+							if (msg.error) pending.reject(new Error(msg.error));
+							else pending.resolve(msg);
+						};
+						worker.onerror = function(ev) {
+							if (ev && ev.preventDefault) ev.preventDefault();
+							if (!started) failStart('worker failed to start');
+							else resetXlsxWorker('spreadsheet worker crashed');
+						};
+					}).catch(function(e) {
+						reject(workerUnavailable('library unavailable: ' + (e && e.message)));
+					});
+				});
+				// A failed start must not be cached forever; the next preview retries.
+				xlsxWorkerPromise.catch(function() { xlsxWorkerPromise = null; });
+				return xlsxWorkerPromise;
+			}
+
+			function xlsxWorkerCall(message) {
+				return getXlsxWorker().then(function(worker) {
+					return new Promise(function(resolve, reject) {
+						var id = ++xlsxRequestSeq;
+						message.id = id;
+						// A parse that takes this long is pathological (ReDoS-class
+						// input): kill the worker - which rejects this request too -
+						// rather than let it burn a core behind the preview.
+						var timer = setTimeout(function() { resetXlsxWorker('spreadsheet parse timed out'); }, 20000);
+						xlsxPending[id] = { resolve: resolve, reject: reject, timer: timer };
+						worker.postMessage(message);
+					});
+				});
+			}
+
+			// Resolves to { names, sheetHtml(name) -> Promise<html> } regardless of
+			// whether the worker or the in-page fallback did the parsing.
+			function openSpreadsheet(rawXlsxB64) {
+				return xlsxWorkerCall({ op: 'open', b64: rawXlsxB64 }).then(function(res) {
+					var bookId = res.book;
+					return {
+						names: res.names || [],
+						sheetHtml: function(name) {
+							return xlsxWorkerCall({ op: 'sheet', book: bookId, name: name }).then(function(r) { return r.html; });
+						}
+					};
+				}, function(err) {
+					if (!err || !err.workerUnavailable) throw err;
+					if (window.waDiagNative) { try { window.waDiagNative('doc: spreadsheet worker unavailable (' + err.message + '); parsing in page'); } catch (e) {} }
+					return ensureXLSXLoaded().then(function() {
+						// SheetJS auto-detects the real format from the bytes (OOXML zip for
+						// .xlsx, binary OLE2/BIFF for legacy .xls, or plain text for .csv), so
+						// one code path previews all three.
+						var workbook = XLSX.read(rawXlsxB64, { type: 'base64', cellDates: true, sheetRows: XLSX_PREVIEW_MAX_ROWS });
+						return {
+							names: (workbook.SheetNames || []).slice(0, 100),
+							sheetHtml: function(name) {
+								return Promise.resolve(XLSX.utils.sheet_to_html(workbook.Sheets[name], { id: 'wa-xlsx-table' }));
+							}
+						};
+					});
+				});
+			}
+
 			// Render a parsed spreadsheet workbook (from the bundled SheetJS library) as an
 			// HTML table, with a sheet-switcher tab bar when the workbook has multiple sheets.
-			function renderSpreadsheetPreview(workbook, activeSheetName) {
-				var sheetNames = (workbook && workbook.SheetNames) || [];
+			function renderSpreadsheetPreview(book, activeSheetName) {
+				var sheetNames = (book && book.names) || [];
 				if (!sheetNames.length) {
 					renderCardFallback('This spreadsheet has no readable sheets.');
 					return;
 				}
 				var activeName = (activeSheetName && sheetNames.indexOf(activeSheetName) !== -1) ? activeSheetName : sheetNames[0];
-				var worksheet = workbook.Sheets[activeName];
-				var tableHtml = sanitizeSheetHtml(XLSX.utils.sheet_to_html(worksheet, { id: 'wa-xlsx-table' }));
+				book.sheetHtml(activeName).then(function(rawHtml) {
+					renderSpreadsheetSheet(book, sheetNames, activeName, sanitizeSheetHtml(rawHtml));
+				}).catch(function() {
+					renderCardFallback('Unable to render an in-app preview for this spreadsheet. Click below to open it in your default application.');
+				});
+			}
+
+			function renderSpreadsheetSheet(book, sheetNames, activeName, tableHtml) {
+				var truncatedNote = (tableHtml.split('<tr').length - 1) >= XLSX_PREVIEW_MAX_ROWS - 1
+					? '<div style="padding:6px 12px;font-size:11px;color:#8696a0;background:#202c33;border-top:1px solid #2a3942;flex-shrink:0;">Preview shows the first ' + (XLSX_PREVIEW_MAX_ROWS - 1) + ' rows. Open the file for the rest.</div>'
+					: '';
 
 				var tabsHtml = '';
 				if (sheetNames.length > 1) {
@@ -1402,14 +1574,14 @@ func getInitScript(ua string) string {
 				var tableStyle = '<style>#wa-xlsx-table{border-collapse:collapse;width:100%;font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#e9edef;}#wa-xlsx-table td,#wa-xlsx-table th{border:1px solid #2a3942;padding:6px 10px;white-space:nowrap;}#wa-xlsx-table tr:nth-child(even){background:#182229;}#wa-xlsx-table tr:nth-child(odd){background:#111b21;}</style>';
 
 				body.innerHTML = '<div style="width:100%;height:100%;display:flex;flex-direction:column;">' + tabsHtml +
-					'<div style="flex:1;overflow:auto;background:#111b21;contain:content;overscroll-behavior:contain;">' + tableStyle + tableHtml + '</div></div>';
+					'<div style="flex:1;overflow:auto;background:#111b21;contain:content;overscroll-behavior:contain;">' + tableStyle + tableHtml + '</div>' + truncatedNote + '</div>';
 
 				var tabsEl = document.getElementById('wa-xlsx-tabs');
 				if (tabsEl) {
 					var tabBtns = tabsEl.querySelectorAll('button');
 					for (var bi2 = 0; bi2 < tabBtns.length; bi2++) {
 						tabBtns[bi2].onclick = function() {
-							renderSpreadsheetPreview(workbook, this.getAttribute('data-sheet'));
+							renderSpreadsheetPreview(book, this.getAttribute('data-sheet'));
 						};
 					}
 				}
@@ -1430,19 +1602,10 @@ func getInitScript(ua string) string {
 				body.innerHTML = '<div style="color:#8696a0;font-size:13px;display:flex;align-items:center;gap:8px;">⏳ Loading spreadsheet preview...</div>';
 				var rawXlsxB64 = (dataUri || '').indexOf(';base64,') !== -1 ? dataUri.split(';base64,')[1] : (dataUri || '');
 				if (rawXlsxB64) {
-					ensureXLSXLoaded().then(function() {
-						try {
-							// SheetJS auto-detects the real format from the bytes (OOXML zip for
-							// .xlsx, binary OLE2/BIFF for legacy .xls, or plain text for .csv), so
-							// one code path correctly previews all three, including .xls which the
-							// previous hand-rolled parser never actually supported.
-							var workbook = XLSX.read(rawXlsxB64, { type: 'base64', cellDates: true });
-							renderSpreadsheetPreview(workbook);
-						} catch (e) {
-							renderCardFallback('Unable to render an in-app preview for this spreadsheet. Click below to open it in your default application.');
-						}
+					openSpreadsheet(rawXlsxB64).then(function(book) {
+						renderSpreadsheetPreview(book);
 					}).catch(function() {
-						renderCardFallback('Unable to load spreadsheet library.');
+						renderCardFallback('Unable to render an in-app preview for this spreadsheet. Click below to open it in your default application.');
 					});
 				} else {
 					renderCardFallback();
@@ -1528,6 +1691,8 @@ func getInitScript(ua string) string {
 					ownedBlobUrl = '';
 				}
 				dataUri = '';
+				xlsxDisposed = true;
+				resetXlsxWorker('preview closed');
 				if (window.dismissStuckViewer) window.dismissStuckViewer();
 			}
 
@@ -1790,6 +1955,44 @@ func getInitScript(ua string) string {
 			window.waIdleReloadAllowed = function() {
 				return idleReloadRefusalReason() === '';
 			};
+		});
+
+		// Session watch: tell the native side when this account's session
+		// appears or disappears, so "I was thrown back to the QR code" leaves a
+		// line in wa_session.log. The native side writes only on a CHANGE, so
+		// the steady-state cost is two selector lookups every five seconds and
+		// no bridge call. Top frame only: the script is injected in every frame.
+		waRunModule('session-watch', function() {
+			if (window.top !== window || typeof window.reportSessionStateNative !== 'function') return;
+			var lastSessionState = '';
+			function report(state, detail) {
+				try { window.reportSessionStateNative(state, detail || ''); } catch (e) {}
+			}
+			function sessionState() {
+				if (document.getElementById('pane-side')) return 'signed-in';
+				if (document.querySelector('div[data-ref] canvas, canvas[aria-label*="QR"], canvas[aria-label*="qr"]')) return 'signed-out';
+				return ''; // still loading, or a screen that is neither
+			}
+			// Read only on the signed-out page, which holds no chat content:
+			// WhatsApp's own notice ("A database error occurred...") is the
+			// best available hint for why the session went away.
+			function signedOutDetail() {
+				try {
+					var notice = document.querySelector('[role="dialog"], [data-animate-modal-popup="true"]');
+					return notice ? String(notice.textContent || '').replace(/\s+/g, ' ').slice(0, 160) : '';
+				} catch (e) {
+					return '';
+				}
+			}
+			function checkSessionState() {
+				var state = sessionState();
+				if (!state || state === lastSessionState) return;
+				lastSessionState = state;
+				report(state, state === 'signed-out' ? signedOutDetail() : '');
+			}
+			report('page-load', '');
+			setTimeout(checkSessionState, 1500);
+			setInterval(checkSessionState, 5000);
 		});
 
 		// Debounced window resize persistence
@@ -3172,10 +3375,27 @@ func getInitScript(ua string) string {
 			function callBridge(name, args) {
 				if (!hasBridge(name)) return Promise.reject(new Error(name + ' is unavailable'));
 				try {
-					return Promise.resolve(window[name].apply(window, args || []));
+					// Native account bridges report refusals as { error: "..." }
+					// rather than throwing, so a resolved value is not a success
+					// by itself. Treating it as one made "Add"/"Rename" refusals
+					// (cap reached, bad label) silently do nothing.
+					return Promise.resolve(window[name].apply(window, args || [])).then(function(value) {
+						if (value && typeof value === 'object' && !Array.isArray(value) && value.error) {
+							var refusal = new Error(String(value.error));
+							refusal.fromNative = true;
+							throw refusal;
+						}
+						return value;
+					});
 				} catch (err) {
 					return Promise.reject(err);
 				}
+			}
+
+			function toastBridgeError(fallback, err) {
+				if (!window.showFloatingToast) return;
+				var message = err && err.fromNative && err.message ? err.message : fallback;
+				window.showFloatingToast(message);
 			}
 
 			function isDarkMode() {
@@ -3354,10 +3574,16 @@ func getInitScript(ua string) string {
 			}
 
 			function requestSwitch(account) {
+				// The active chip is not a switch target. Clicking it used to raise
+				// the switch veil, the native side then (correctly) refused the
+				// no-op switch, and nothing ever took the veil down again: the
+				// whole window stayed dimmed until a reload.
+				if (account && account.active) return;
 				if (switchingId !== null || !hasBridge('requestAccountSwitchNative')) {
 					if (!hasBridge('requestAccountSwitchNative')) showBridgeUnavailable();
 					return;
 				}
+				closeAccountMenu();
 				switchingId = account.id;
 				renderDock(window.__waAccountRailAccounts || []);
 				showSwitchVeil();
@@ -3365,12 +3591,19 @@ func getInitScript(ua string) string {
 				// two WhatsApp pages briefly alive would otherwise double the
 				// renderer load right when the fresh account starts painting.
 				waBackgroundWorkBusyUntil = Date.now() + 5000;
-				callBridge('requestAccountSwitchNative', [account.id, String(window.__waDockLastBadge || '')]).then(function() {
+				callBridge('requestAccountSwitchNative', [account.id, String(window.__waDockLastBadge || '')]).then(function(accepted) {
+					// false = the native side declined (a swap still settling, or the
+					// target already active). This page stays, so the veil must go.
+					if (accepted === false) {
+						hideSwitchVeil();
+						waBackgroundWorkBusyUntil = 0;
+					}
 					// Native switching may terminate and relaunch the whole process. If it
 					// does not, refresh the active marker before unlocking the dock.
 					return loadAccounts();
 				}).catch(function() {
 					hideSwitchVeil();
+					waBackgroundWorkBusyUntil = 0;
 					if (window.showFloatingToast) window.showFloatingToast('Unable to switch account.');
 				}).then(function() {
 					switchingId = null;
@@ -3385,9 +3618,147 @@ func getInitScript(ua string) string {
 				}
 				showAccountLabelModal({ title: 'Rename account', initialValue: account.label, confirmText: 'Rename' }).then(function(label) {
 					if (label === null) return;
-					return callBridge('renameAccountNative', [account.id, label]).then(loadAccounts).catch(function() {
-						if (window.showFloatingToast) window.showFloatingToast('Unable to rename account.');
+					return callBridge('renameAccountNative', [account.id, label]).then(loadAccounts).catch(function(err) {
+						toastBridgeError('Unable to rename account.', err);
 					});
+				});
+			}
+
+			// Removing is offered only where it is allowed, mirroring
+			// removeAccount() in accounts.go: never the first account (it is the
+			// original profile) and never the active one (its engine owns the
+			// profile). The native side enforces the same rules regardless.
+			function canRemoveAccount(account, index) {
+				return index > 0 && !account.active;
+			}
+
+			function removeAccountFlow(account) {
+				if (!hasBridge('removeAccountNative')) {
+					showBridgeUnavailable();
+					return;
+				}
+				showAccountConfirmModal({
+					title: 'Remove "' + account.label + '"?',
+					body: 'This account is removed from WhatsApp Desk and its saved session is set aside on this computer. To use it again you will need to add it and scan the QR code. Also unlink this device on your phone: WhatsApp → Settings → Linked devices.',
+					confirmText: 'Remove',
+					danger: true
+				}).then(function(ok) {
+					if (!ok) return;
+					return callBridge('removeAccountNative', [account.id]).then(function() {
+						if (window.showFloatingToast) window.showFloatingToast('Account "' + account.label + '" removed.');
+						return loadAccounts();
+					}).catch(function(err) {
+						toastBridgeError('Unable to remove account.', err);
+					});
+				});
+			}
+
+			var accountMenuId = 'wa-account-menu';
+
+			// Detaches the open menu's document listeners. They used to remove
+			// themselves only when they fired, so a menu closed by choosing an
+			// item left both behind: the stale mousedown handler then closed the
+			// NEXT menu the moment one of its items was pressed, and a keydown
+			// handler piled up for every menu ever opened.
+			var accountMenuCleanup = null;
+
+			function closeAccountMenu() {
+				if (accountMenuCleanup) {
+					accountMenuCleanup();
+					accountMenuCleanup = null;
+				}
+				var menu = document.getElementById(accountMenuId);
+				if (menu && menu.parentNode) menu.parentNode.removeChild(menu);
+			}
+
+			// Right-click menu on an account chip. Before this, rename was only
+			// reachable by an undiscoverable double-click and an account could not
+			// be removed at all.
+			function showAccountMenu(account, index, x, y) {
+				closeAccountMenu();
+				var dark = isDarkMode();
+				var menu = document.createElement('div');
+				menu.id = accountMenuId;
+				menu.setAttribute('role', 'menu');
+				menu.style.cssText = 'position:fixed;left:' + Math.max(4, x) + 'px;top:' + Math.max(4, y) + 'px;z-index:2147483002;min-width:180px;padding:6px 0;border-radius:8px;background:' + (dark ? '#233138' : '#ffffff') + ';color:' + (dark ? '#e9edef' : '#111b21') + ';box-shadow:0 8px 28px rgba(0,0,0,.28);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+				function item(label, enabled, hint, action) {
+					var row = document.createElement('button');
+					row.type = 'button';
+					row.setAttribute('role', 'menuitem');
+					row.textContent = label;
+					row.disabled = !enabled;
+					if (hint) row.title = hint;
+					row.style.cssText = 'display:block;width:100%;text-align:left;background:transparent;border:0;padding:8px 14px;font:inherit;color:inherit;cursor:' + (enabled ? 'pointer' : 'default') + ';opacity:' + (enabled ? '1' : '.45') + ';';
+					row.onmouseenter = function() { if (enabled) row.style.background = dark ? 'rgba(134,150,160,.15)' : 'rgba(17,27,33,.06)'; };
+					row.onmouseleave = function() { row.style.background = 'transparent'; };
+					row.onclick = function() { closeAccountMenu(); if (enabled) action(); };
+					menu.appendChild(row);
+				}
+				if (!account.active) item('Switch to this account', switchingId === null, '', function() { requestSwitch(account); });
+				item('Rename…', true, '', function() { renameAccount(account); });
+				var removable = canRemoveAccount(account, index);
+				item('Remove account…', removable,
+					removable ? '' : (index === 0 ? 'The first account cannot be removed.' : 'Switch to the other account first.'),
+					function() { removeAccountFlow(account); });
+				document.documentElement.appendChild(menu);
+				// Keep the menu on screen near the window's bottom edge.
+				var rect = menu.getBoundingClientRect();
+				if (rect.bottom > window.innerHeight - 4) menu.style.top = Math.max(4, window.innerHeight - rect.height - 4) + 'px';
+				var onDown = function(e) { if (!menu.contains(e.target)) closeAccountMenu(); };
+				var onKey = function(e) { if (e.key === 'Escape') closeAccountMenu(); };
+				// Armed on the next turn so the right-click that opened the menu
+				// does not immediately close it.
+				var armTimer = setTimeout(function() {
+					document.addEventListener('mousedown', onDown, true);
+					document.addEventListener('keydown', onKey, true);
+				}, 0);
+				accountMenuCleanup = function() {
+					clearTimeout(armTimer);
+					document.removeEventListener('mousedown', onDown, true);
+					document.removeEventListener('keydown', onKey, true);
+				};
+			}
+
+			function showAccountConfirmModal(options) {
+				return new Promise(function(resolve) {
+					closeAccountModal();
+					var dark = isDarkMode();
+					var overlay = document.createElement('div');
+					overlay.id = modalId;
+					overlay.style.cssText = 'position:fixed;inset:0;background:rgba(11,20,26,.55);z-index:2147483001;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+					var panel = document.createElement('div');
+					panel.setAttribute('role', 'alertdialog');
+					panel.setAttribute('aria-modal', 'true');
+					panel.style.cssText = 'width:360px;max-width:100%;background:' + (dark ? '#233138' : '#ffffff') + ';color:' + (dark ? '#e9edef' : '#111b21') + ';border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.35);padding:20px;box-sizing:border-box;';
+					var title = document.createElement('h2');
+					title.textContent = options.title;
+					title.style.cssText = 'margin:0 0 10px;font-size:16px;font-weight:600;';
+					var body = document.createElement('p');
+					body.textContent = options.body;
+					body.style.cssText = 'margin:0;font-size:13px;line-height:1.5;color:' + (dark ? '#8696a0' : '#667781') + ';';
+					var actions = document.createElement('div');
+					actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:18px;';
+					var cancel = document.createElement('button');
+					cancel.type = 'button';
+					cancel.textContent = 'Cancel';
+					cancel.style.cssText = 'background:transparent;border:0;color:' + (dark ? '#8696a0' : '#667781') + ';font-size:13px;padding:8px 12px;cursor:pointer;border-radius:6px;';
+					var confirmBtn = document.createElement('button');
+					confirmBtn.type = 'button';
+					confirmBtn.textContent = options.confirmText || 'OK';
+					confirmBtn.style.cssText = 'background:' + (options.danger ? '#ea0038' : '#00a884') + ';border:0;color:#ffffff;font-size:13px;font-weight:600;padding:8px 14px;cursor:pointer;border-radius:6px;';
+					function finish(value) { closeAccountModal(); resolve(value); }
+					cancel.onclick = function() { finish(false); };
+					confirmBtn.onclick = function() { finish(true); };
+					overlay.addEventListener('keydown', function(e) { if (e.key === 'Escape') { e.stopPropagation(); finish(false); } });
+					overlay.addEventListener('mousedown', function(e) { if (e.target === overlay) finish(false); });
+					actions.appendChild(cancel);
+					actions.appendChild(confirmBtn);
+					panel.appendChild(title);
+					panel.appendChild(body);
+					panel.appendChild(actions);
+					overlay.appendChild(panel);
+					document.body.appendChild(overlay);
+					cancel.focus();
 				});
 			}
 
@@ -3404,8 +3775,11 @@ func getInitScript(ua string) string {
 				}
 				showAccountLabelModal({ title: 'Add account', confirmText: 'Add' }).then(function(label) {
 					if (label === null) return;
-					return callBridge('createAccountNative', [label]).then(loadAccounts).catch(function() {
-						if (window.showFloatingToast) window.showFloatingToast('Unable to create account.');
+					return callBridge('createAccountNative', [label]).then(function() {
+						if (window.showFloatingToast) window.showFloatingToast('Account "' + label + '" added. Click it to switch, then scan the QR code.');
+						return loadAccounts();
+					}).catch(function(err) {
+						toastBridgeError('Unable to create account.', err);
 					});
 				});
 			}
@@ -3530,8 +3904,12 @@ func getInitScript(ua string) string {
 					var button = document.createElement('button');
 					button.type = 'button';
 					button.disabled = switchingId !== null;
-					button.setAttribute('aria-label', (account.active ? 'Active account: ' : 'Switch to ') + account.label + '. Double-click to rename.');
-					button.title = account.label + (account.active ? ' (active)' : '') + '\nDouble-click to rename';
+					button.setAttribute('aria-label', (account.active ? 'Active account: ' : 'Switch to ') + account.label + '. Right-click for options.');
+					// Only one account runs at a time (see docs/research), so an
+					// inactive account receives no messages or notifications until
+					// it is opened. Say so where the user looks, instead of letting
+					// a silent account read as a broken one.
+					button.title = account.label + (account.active ? ' (active)' : '\nNotifications paused until you switch to it') + '\nRight-click for options';
 					button.style.cssText = 'position:relative;width:38px;height:38px;padding:0;border-radius:50%;border:2px solid ' + (account.active ? '#00a884' : 'transparent') + ';background:' + (account.active ? '#005c4b' : '#2a3942') + ';color:#e9edef;font-size:12px;font-weight:700;letter-spacing:.2px;cursor:' + (switchingId !== null ? 'wait' : 'pointer') + ';outline:none;transition:transform .15s ease,background-color .15s ease,border-color .15s ease;';
 					button.textContent = isSwitching ? '…' : accountInitials(account.label);
 					if (isSwitching) button.setAttribute('aria-busy', 'true');
@@ -3543,10 +3921,16 @@ func getInitScript(ua string) string {
 						dot.style.cssText = 'position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;padding:0 4px;box-sizing:border-box;border-radius:9px;background:#25d366;color:#111b21;font-size:10px;font-weight:700;line-height:18px;text-align:center;';
 						dot.textContent = account.unread;
 						button.appendChild(dot);
-						button.title = account.label + '\n' + account.unread + ' unread when last active';
+						button.title = account.label + '\n' + account.unread + ' unread when last active\nNotifications paused until you switch to it\nRight-click for options';
 					}
 					button.onclick = function() { requestSwitch(account); };
 					button.ondblclick = function(e) { e.preventDefault(); renameAccount(account); };
+					button.oncontextmenu = function(e) {
+						e.preventDefault();
+						e.stopPropagation();
+						if (switchingId !== null) return;
+						showAccountMenu(account, index, e.clientX + 2, e.clientY + 2);
+					};
 					button.onmouseenter = function() { if (!button.disabled) button.style.transform = 'scale(1.06)'; };
 					button.onmouseleave = function() { button.style.transform = 'scale(1)'; };
 					scroll.appendChild(button);
@@ -4922,6 +5306,25 @@ func getInitScript(ua string) string {
 						'</label>' : '');
 				modal.appendChild(actionsSection);
 
+				// Section 3b: Network proxy (#84). Only shown when the native side
+				// supports it (Windows; macOS 14+). Applied at engine start, so the
+				// panel says a restart is needed instead of pretending it is live.
+				if (typeof window.getProxyNative === 'function' && typeof window.setProxyNative === 'function') {
+					var proxySection = document.createElement('div');
+					proxySection.className = 'wa-modal-card';
+					proxySection.id = 'wa-proxy-section';
+					proxySection.style.cssText = 'display:none;flex-direction:column;gap:8px;border-radius:0;border-width:0 0 1px;border-style:solid;padding:14px 0;';
+					proxySection.innerHTML = '' +
+						'<strong class="wa-text-primary" style="font-size:12.5px;">Network proxy</strong>' +
+						'<div class="wa-text-muted" style="font-size:11px;">Route WhatsApp through a SOCKS5 or HTTP proxy. Leave empty to connect directly. Applies after restarting WhatsApp Desk.</div>' +
+						'<div style="display:flex;gap:6px;align-items:center;">' +
+						'  <input id="wa-proxy-input" type="text" spellcheck="false" autocomplete="off" placeholder="socks5://127.0.0.1:1080" style="flex:1;min-width:0;font-size:11.5px;font-family:monospace;padding:6px 8px;border-radius:6px;border:1px solid #3b4a54;background:transparent;color:inherit;outline:none;" />' +
+						'  <button id="wa-proxy-save" style="background:#00a884;color:#111b21;border:none;padding:6px 12px;border-radius:6px;font-size:11.5px;font-weight:600;cursor:pointer;">Save</button>' +
+						'</div>' +
+						'<div id="wa-proxy-status" class="wa-text-muted" aria-live="polite" style="font-size:10.5px;min-height:14px;"></div>';
+					modal.appendChild(proxySection);
+				}
+
 				// Section 4: Help & local diagnostics. This intentionally performs no
 				// network request and never reads chat data; it only validates the
 				// small native bridge surface used by the application.
@@ -5209,6 +5612,48 @@ func getInitScript(ua string) string {
 							'🙈 Profile photos: blurred (hover to peek)' :
 							'🙉 Profile photos: visible');
 					};
+				}
+				var proxySectionEl = document.getElementById('wa-proxy-section');
+				if (proxySectionEl) {
+					var proxyInput = document.getElementById('wa-proxy-input');
+					var proxyStatus = document.getElementById('wa-proxy-status');
+					var proxySaved = '';
+					Promise.resolve(window.getProxyNative()).then(function(info) {
+						info = info || {};
+						if (!info.supported) return; // e.g. macOS 13: keep hidden
+						proxySaved = String(info.proxy || '');
+						proxyInput.value = proxySaved;
+						if (info.failed && proxySaved) {
+							// Saved, but the engine could not install it: say so
+							// rather than claim a proxy that is not in use.
+							proxyStatus.style.color = '#f15c6d';
+							proxyStatus.textContent = 'This proxy could not be applied. WhatsApp is connected directly.';
+						} else {
+							proxyStatus.textContent = proxySaved ? 'Active: ' + proxySaved : 'Not using a proxy.';
+						}
+						proxySectionEl.style.display = 'flex';
+					}).catch(function() {});
+					var saveProxy = function() {
+						Promise.resolve(window.setProxyNative(proxyInput.value)).then(function(res) {
+							res = res || {};
+							if (res.error) {
+								proxyStatus.style.color = '#f15c6d';
+								proxyStatus.textContent = res.error;
+								return;
+							}
+							proxyStatus.style.color = '';
+							proxySaved = String(res.proxy || '');
+							proxyInput.value = proxySaved;
+							proxyStatus.textContent = res.restart
+								? (proxySaved ? 'Saved. Restart WhatsApp Desk to connect through ' + proxySaved + '.' : 'Proxy removed. Restart WhatsApp Desk to connect directly.')
+								: (proxySaved ? 'Active: ' + proxySaved : 'Not using a proxy.');
+						}).catch(function() {
+							proxyStatus.style.color = '#f15c6d';
+							proxyStatus.textContent = 'Could not save the proxy setting.';
+						});
+					};
+					document.getElementById('wa-proxy-save').onclick = saveProxy;
+					proxyInput.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); saveProxy(); } };
 				}
 				var idleReloadBox = document.getElementById('wa-idle-memory-reload');
 				if (idleReloadBox) {

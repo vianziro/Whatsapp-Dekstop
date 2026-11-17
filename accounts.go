@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -49,18 +50,33 @@ func legacyProfileDir() string {
 	return filepath.Join(filepath.Dir(getSettingsFilePath()), "UserData")
 }
 
+// accountProfilesRoot holds the isolated profile of every account but the
+// first. It sits beside accounts.json (which itself sits beside the settings
+// file in production), so tests that relocate the registry also relocate every
+// profile directory and never touch the real user profile.
+func accountProfilesRoot() string {
+	return filepath.Join(filepath.Dir(accountRegistryFilePath()), "Profiles")
+}
+
 func accountProfileDir(accountID string) (string, error) {
 	registry, err := loadAccountRegistry()
 	if err != nil {
 		return "", err
 	}
-	if !registry.hasAccount(accountID) {
+	return registry.profileDirFor(accountID)
+}
+
+// profileDirFor resolves an account's profile directory from a registry the
+// caller already holds, so hot paths (engine start, every switch) read
+// accounts.json once instead of once per lookup.
+func (r AccountRegistry) profileDirFor(accountID string) (string, error) {
+	if !r.hasAccount(accountID) {
 		return "", errors.New("account does not exist")
 	}
-	if accountID == registry.Accounts[0].ID {
+	if accountID == r.Accounts[0].ID {
 		return legacyProfileDir(), nil
 	}
-	return filepath.Join(filepath.Dir(getSettingsFilePath()), "Profiles", accountID), nil
+	return filepath.Join(accountProfilesRoot(), accountID), nil
 }
 
 func defaultAccountRegistry() AccountRegistry {
@@ -118,7 +134,17 @@ func (r AccountRegistry) hasAccount(id string) bool {
 func loadAccountRegistry() (AccountRegistry, error) {
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()
+	return loadAccountRegistryResilientLocked()
+}
 
+// loadAccountRegistryResilientLocked is the one read path for the registry:
+// retries, snapshot recovery for a corrupt or lost file, and the snapshot
+// heal. Every mutation (create, rename, switch, remove) goes through it too.
+// Mutations used to call the raw reader, which answered a lost accounts.json
+// by minting a brand-new default registry and SAVING it - so a single missed
+// read during an account switch permanently dropped the second account and
+// overwrote the snapshot that could have recovered it.
+func loadAccountRegistryResilientLocked() (AccountRegistry, error) {
 	// A missing registry file alongside an existing snapshot is not a fresh
 	// install (fresh installs have neither): the registry file was lost. Start
 	// from the snapshot instead of bootstrapping a brand-new default account,
@@ -146,9 +172,14 @@ func loadAccountRegistry() (AccountRegistry, error) {
 		if err == nil {
 			// Migration: installs from before the snapshot existed hold a
 			// valid registry but no snapshot yet. Seed it once so the very
-			// first read failure is already covered.
-			if _, ok := loadAccountRegistrySnapshotLocked(); !ok {
-				saveAccountRegistrySnapshotLocked(registry)
+			// first read failure is already covered. Checked once per process
+			// (per snapshot location) rather than re-reading the snapshot on
+			// every registry read: the dock and engine loop read often.
+			if accountSnapshotSeededFor != accountSnapshotFilePath() {
+				if _, ok := loadAccountRegistrySnapshotLocked(); !ok {
+					saveAccountRegistrySnapshotLocked(registry)
+				}
+				accountSnapshotSeededFor = accountSnapshotFilePath()
 			}
 			return registry, nil
 		}
@@ -175,6 +206,11 @@ const (
 	accountRegistryReadAttempts   = 3
 	accountRegistryReadRetryDelay = 50 * time.Millisecond
 )
+
+// accountSnapshotSeededFor remembers the snapshot path already verified this
+// process. Guarded by accountRegistryMu. Keyed by path so tests that relocate
+// the registry each get their own first-load seeding.
+var accountSnapshotSeededFor string
 
 // accountSnapshotFilePath mirrors the registry location, so tests that
 // relocate the registry automatically relocate the snapshot with it and cannot
@@ -303,7 +339,7 @@ func createAccount(label string) (Account, error) {
 	}
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()
-	registry, err := loadAccountRegistryLocked()
+	registry, err := loadAccountRegistryResilientLocked()
 	if err != nil {
 		return Account{}, err
 	}
@@ -325,7 +361,7 @@ func renameAccount(id, label string) (Account, error) {
 	}
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()
-	registry, err := loadAccountRegistryLocked()
+	registry, err := loadAccountRegistryResilientLocked()
 	if err != nil {
 		return Account{}, err
 	}
@@ -373,11 +409,6 @@ func activeAccountProfileIdentifier() (string, error) {
 	return registry.ActiveAccountID, nil
 }
 
-func isActiveAccount(id string) bool {
-	registry, err := loadAccountRegistry()
-	return err == nil && registry.ActiveAccountID == id
-}
-
 // activeAccountDataPath returns the on-disk profile directory for the active
 // account, creating it when it is new. The first account deliberately returns
 // the legacy profile location (by reference, never a copy), so an existing
@@ -385,16 +416,18 @@ func isActiveAccount(id string) bool {
 // is path-based — WebView2 user-data folders and the WebKitGTK website data
 // manager — use this as their per-account storage root.
 func activeAccountDataPath() (string, error) {
-	id, err := activeAccountProfileIdentifier()
+	// One registry read for the whole resolution; this runs on every engine
+	// (re)build, i.e. on every account switch on Windows and Linux.
+	registry, err := loadAccountRegistry()
 	if err != nil {
 		return "", err
 	}
-	if id == "" {
-		return legacyProfileDir(), nil
-	}
-	dir, err := accountProfileDir(id)
+	dir, err := registry.profileDirFor(registry.ActiveAccountID)
 	if err != nil {
 		return "", err
+	}
+	if dir == legacyProfileDir() {
+		return dir, nil
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
@@ -402,10 +435,176 @@ func activeAccountDataPath() (string, error) {
 	return dir, nil
 }
 
+// switchActiveAccount records the outgoing account's unread hint and makes
+// id the active account, as ONE locked read-modify-write. The bridges used to
+// do this as three separate registry round-trips (isActiveAccount, then
+// setLastUnreadForActiveAccount, then setActiveAccount): three reads, two
+// writes, and a window between them where another write could interleave.
+// changed is false - with no error and no write - when id is already active.
+func switchActiveAccount(id, outgoingLastUnread string) (changed bool, err error) {
+	accountRegistryMu.Lock()
+	defer accountRegistryMu.Unlock()
+	registry, err := loadAccountRegistryResilientLocked()
+	if err != nil {
+		return false, err
+	}
+	if !registry.hasAccount(id) {
+		return false, errors.New("account does not exist")
+	}
+	if registry.ActiveAccountID == id {
+		return false, nil
+	}
+	hint := sanitizeLastUnread(outgoingLastUnread)
+	for i := range registry.Accounts {
+		if registry.Accounts[i].ID == registry.ActiveAccountID {
+			registry.Accounts[i].LastUnread = hint
+		}
+	}
+	registry.ActiveAccountID = id
+	if err := saveAccountRegistryLocked(registry); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// errFirstAccountNotRemovable and errActiveAccountNotRemovable are surfaced to
+// the dock verbatim, so they are phrased for the user.
+var (
+	errFirstAccountNotRemovable  = errors.New("The first account can't be removed. To use another number there, log out inside WhatsApp (Menu → Log out).")
+	errActiveAccountNotRemovable = errors.New("Switch to the other account first, then remove this one.")
+)
+
+// removeAccount drops a saved account from the registry and retires its
+// profile data. Two accounts are never removable:
+//   - the first one, because it IS the legacy profile (adopted by reference,
+//     see legacyProfileDir); retiring it would also retire the pre-multi-
+//     account session data and leave the registry with no default slot;
+//   - the active one, because its engine owns the profile right now
+//     (WebView2 forbids touching a user-data folder in use, and WebKit's
+//     network process holds the store open).
+//
+// Profile data is moved aside rather than deleted, matching the design doc's
+// "recoverably removed": nothing is destroyed if the user removed the wrong
+// account, and the next "Add account" always starts from a clean profile
+// because it gets a fresh id.
+func removeAccount(id string) (Account, error) {
+	accountRegistryMu.Lock()
+	registry, err := loadAccountRegistryResilientLocked()
+	if err != nil {
+		accountRegistryMu.Unlock()
+		return Account{}, err
+	}
+	if !registry.hasAccount(id) {
+		accountRegistryMu.Unlock()
+		return Account{}, errors.New("account does not exist")
+	}
+	if registry.Accounts[0].ID == id {
+		accountRegistryMu.Unlock()
+		return Account{}, errFirstAccountNotRemovable
+	}
+	if registry.ActiveAccountID == id {
+		accountRegistryMu.Unlock()
+		return Account{}, errActiveAccountNotRemovable
+	}
+	var removed Account
+	kept := make([]Account, 0, len(registry.Accounts))
+	for _, account := range registry.Accounts {
+		if account.ID == id {
+			removed = account
+			continue
+		}
+		kept = append(kept, account)
+	}
+	registry.Accounts = kept
+	if err := saveAccountRegistryLocked(registry); err != nil {
+		accountRegistryMu.Unlock()
+		return Account{}, err
+	}
+	accountRegistryMu.Unlock()
+
+	// Outside the lock: renames can be slow on network/AV-scanned drives and
+	// the registry is already consistent without them.
+	retireAccountProfileData(id)
+	return removed, nil
+}
+
+// accountWebKitStoreRoot is where macOS WebKit keeps each non-default
+// account's persistent website data store (see auditAccountWebKitStore). A
+// variable so tests can point it at a temp dir.
+var accountWebKitStoreRoot = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "WebKit", "com.whatsapp.desk", "WebsiteDataStore")
+}
+
+// accountProfileDataDirs lists every on-disk location an account's session
+// may live in on this platform.
+func accountProfileDataDirs(id string) []string {
+	dirs := []string{filepath.Join(accountProfilesRoot(), id)}
+	if runtime.GOOS == "darwin" {
+		if root := accountWebKitStoreRoot(); root != "" {
+			dirs = append(dirs, filepath.Join(root, webKitStoreDirName(id)))
+		}
+	}
+	return dirs
+}
+
+// webKitStoreDirName is the folder WebKit names an account's data store. The
+// engine (webview.h) turns the account id into an NSUUID, and WebKit names the
+// folder after that UUID in its canonical dashed, lowercase form. Accounts
+// created before newAccountID emitted dashes are stored as 32 undashed hex
+// characters, so joining the raw id pointed at a folder that never exists:
+// removing such an account left its logged-in session where it was.
+func webKitStoreDirName(id string) string {
+	if len(id) != 32 {
+		return strings.ToLower(id)
+	}
+	for _, r := range id {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return id
+		}
+	}
+	id = strings.ToLower(id)
+	return id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
+}
+
+// isSafeAccountPathElement guards the only destructive filesystem operation
+// keyed by registry content. accounts.json is a user-writable file, so an id
+// such as "../.." must never be joined into a path that is then renamed.
+func isSafeAccountPathElement(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\:`) && filepath.Base(id) == id
+}
+
+// retireAccountProfileData moves a removed account's profile aside as
+// "<dir>.removed-<unix>". Best effort: a failure (e.g. a WebView2 helper
+// process that has not exited yet still holding the folder) is logged and
+// leaves the data where it was; the account is already gone from the
+// registry, so the leftover folder is simply never loaded again.
+var retireAccountProfileData = func(id string) {
+	if !isSafeAccountPathElement(id) {
+		cacheDebugLog("account remove: refusing to touch profile data for unsafe id %q", id)
+		return
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
+	for _, dir := range accountProfileDataDirs(id) {
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		target := dir + ".removed-" + stamp
+		if err := os.Rename(dir, target); err != nil {
+			cacheDebugLog("account remove: could not move %s aside (%v); it is no longer used", dir, err)
+			continue
+		}
+		cacheDebugLog("account remove: moved %s to %s", dir, target)
+	}
+}
+
 func setActiveAccount(id string) error {
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()
-	registry, err := loadAccountRegistryLocked()
+	registry, err := loadAccountRegistryResilientLocked()
 	if err != nil {
 		return err
 	}
@@ -442,7 +641,7 @@ func setLastUnreadForActiveAccount(value string) error {
 	value = sanitizeLastUnread(value)
 	accountRegistryMu.Lock()
 	defer accountRegistryMu.Unlock()
-	registry, err := loadAccountRegistryLocked()
+	registry, err := loadAccountRegistryResilientLocked()
 	if err != nil {
 		return err
 	}
@@ -457,3 +656,33 @@ func setLastUnreadForActiveAccount(value string) error {
 	}
 	return errors.New("account does not exist")
 }
+
+// labelNotificationTitle prefixes a native notification with the active
+// account's label once a second account exists ("Work · Alice"), so a
+// notification says which WhatsApp it came from. With a single account the
+// title is untouched. Privacy Mode redaction happens in the page before the
+// bridge is called, so only the user-chosen label is ever added here.
+func labelNotificationTitle(title string) string {
+	// App-level notices (the updater's) are not from either account.
+	if title == appUpdateNotificationTitle {
+		return title
+	}
+	registry, err := loadAccountRegistry()
+	if err != nil || len(registry.Accounts) < 2 {
+		return title
+	}
+	for _, account := range registry.Accounts {
+		if account.ID != registry.ActiveAccountID {
+			continue
+		}
+		if strings.TrimSpace(title) == "" {
+			return account.Label
+		}
+		return account.Label + " · " + title
+	}
+	return title
+}
+
+// appUpdateNotificationTitle mirrors the title the page uses for the update
+// notice (main.go, "var notifTitle = 'Update Available'").
+const appUpdateNotificationTitle = "Update Available"

@@ -4,13 +4,92 @@ package main
 
 /*
 #cgo darwin CFLAGS: -x objective-c
-#cgo darwin LDFLAGS: -framework Cocoa -framework WebKit -framework PDFKit -framework UserNotifications -framework AVFoundation
+#cgo darwin LDFLAGS: -framework Cocoa -framework WebKit -framework PDFKit -framework UserNotifications -framework AVFoundation -framework Network
 
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <PDFKit/PDFKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <AVFoundation/AVFoundation.h>
+#import <Network/Network.h>
+#include <dlfcn.h>
+
+// ---- Proxy (#84) ----------------------------------------------------------
+// Go stores the saved proxy here before a WebView is created or swapped;
+// applyProxyToWebView pushes it into that view's website data store. WebKit
+// only exposes per-store proxies from macOS 14 (WKWebsiteDataStore
+// .proxyConfigurations), so older systems report the feature as unsupported
+// and the settings panel hides it. kind: 0 none, 1 SOCKS5, 2 HTTP CONNECT.
+static char g_proxyHost[256];
+static char g_proxyPort[8];
+static int g_proxyKind = 0;
+
+static void whatsappDeskSetProxy(const char* host, const char* port, int kind) {
+    g_proxyKind = 0;
+    g_proxyHost[0] = 0;
+    g_proxyPort[0] = 0;
+    if (kind == 0 || host == NULL || port == NULL) return;
+    strlcpy(g_proxyHost, host, sizeof(g_proxyHost));
+    strlcpy(g_proxyPort, port, sizeof(g_proxyPort));
+    g_proxyKind = kind;
+}
+
+// The macOS 14 proxy API is reached at RUNTIME (dlsym + KVC) rather than by
+// name, so this file compiles against any SDK the build machine has and the
+// feature simply reports "unsupported" where the symbols are absent.
+typedef id (*wa_nw_proxy_socks_fn)(id endpoint);
+typedef id (*wa_nw_proxy_http_fn)(id endpoint, id tlsOptions);
+
+static int whatsappDeskProxySupported(void) {
+    if (@available(macOS 14.0, *)) {
+        return dlsym(RTLD_DEFAULT, "nw_proxy_config_create_socksv5") != NULL
+            && [WKWebsiteDataStore instancesRespondToSelector:NSSelectorFromString(@"setProxyConfigurations:")];
+    }
+    return 0;
+}
+
+// Outcome of the last applyProxyToWebView: 0 no proxy wanted, 1 applied,
+// -1 a proxy is saved but could not be installed on the view. The last case
+// means WhatsApp connects DIRECTLY, so it must never pass silently: Go logs
+// it and the settings panel shows it.
+static int g_proxyApplyState = 0;
+
+static int whatsappDeskProxyApplyState(void) { return g_proxyApplyState; }
+
+static void applyProxyToWebView(WKWebView* wv) {
+    g_proxyApplyState = 0;
+    if (!whatsappDeskProxySupported()) return;
+    // Pessimistic until the configuration is actually installed below, so
+    // every early return and any exception reads as a failure.
+    if (g_proxyKind != 0) g_proxyApplyState = -1;
+    @try {
+        WKWebsiteDataStore* store = wv.configuration.websiteDataStore;
+        if (store == nil) return;
+        if (g_proxyKind == 0) {
+            [store setValue:@[] forKey:@"proxyConfigurations"];
+            return;
+        }
+        nw_endpoint_t endpoint = nw_endpoint_create_host(g_proxyHost, g_proxyPort);
+        if (endpoint == nil) return;
+        id config = nil;
+        if (g_proxyKind == 1) {
+            wa_nw_proxy_socks_fn fn = (wa_nw_proxy_socks_fn)dlsym(RTLD_DEFAULT, "nw_proxy_config_create_socksv5");
+            if (fn) config = fn((id)endpoint);
+        } else if (g_proxyKind == 2) {
+            wa_nw_proxy_http_fn fn = (wa_nw_proxy_http_fn)dlsym(RTLD_DEFAULT, "nw_proxy_config_create_http_connect");
+            if (fn) config = fn((id)endpoint, nil);
+        }
+        // Manual retain/release file: both create functions return +1.
+        nw_release((void*)endpoint);
+        if (config != nil) {
+            [store setValue:@[config] forKey:@"proxyConfigurations"];
+            nw_release((void*)config);
+            g_proxyApplyState = 1;
+        }
+    } @catch (NSException* e) {
+        NSLog(@"WhatsApp Desk: proxy could not be applied: %@", e);
+    }
+}
 #include <stdlib.h>
 
 // Defined in the vendored WebKit header. Rebuilds the live WebView's browser
@@ -19,6 +98,10 @@ package main
 // is what makes an account switch read as an in-page reload rather than an app
 // restart. Returns 0 when no live instance is available.
 extern int webview_recreate_browser_active(void);
+
+// Defined in idle_recycle_darwin.go (exported from Go). Swaps the browser view
+// for a fresh one so an idle reload also gets a fresh page process.
+extern int waDeskIdleRecycleBrowser(void);
 
 // Declared early so the memory purge routine below can reach the live WKWebView
 // instance (and its real, already-attached website data store) instead of only
@@ -387,6 +470,9 @@ static void setWKWebViewUserAgentAndMedia(void* nsWindowPtr, const char* uaStr) 
         WKWebView* wv = [contentView isKindOfClass:[WKWebView class]] ? (WKWebView*)contentView : findWKWebView(contentView);
         if (wv) {
             g_mainWebView = wv;
+            // Before the first navigation of this (possibly brand-new, after an
+            // account swap) view, so WhatsApp's connections use the proxy.
+            applyProxyToWebView(wv);
             [wv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             NSString* ua = [NSString stringWithUTF8String:uaStr];
             [wv setCustomUserAgent:ua];
@@ -774,9 +860,23 @@ static void idleMemoryReloadTick(void) {
         if (!idleReloadWindowIsHidden()) return;
         g_idleReloadLastAt = [NSDate timeIntervalSinceReferenceDate];
         NSTimeInterval hiddenFor = (g_idleReloadLastAt - g_idleReloadHiddenSince) / 60.0;
-        NSLog(@"[WhatsApp Desk] idle memory reload: page reloaded after %.0f min off screen", hiddenFor);
-        logIdleReloadEvent([NSString stringWithFormat:@"reloading after %.0f min hidden", hiddenFor]);
-        [wv reload];
+        // Next main-queue turn, not inline: this handler belongs to the very
+        // view the swap is about to retire.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // A fresh view gets a fresh WebContent process, so the memory the
+            // old page dirtied goes back to the system. [wv reload] reloads in
+            // the SAME process and gives back very little; it stays only as
+            // the fallback when the swap is unavailable (e.g. an account
+            // switch is settling).
+            if (waDeskIdleRecycleBrowser()) {
+                NSLog(@"[WhatsApp Desk] idle memory reload: page process recycled after %.0f min off screen", hiddenFor);
+                logIdleReloadEvent([NSString stringWithFormat:@"recycling the page process after %.0f min hidden", hiddenFor]);
+                return;
+            }
+            NSLog(@"[WhatsApp Desk] idle memory reload: page reloaded after %.0f min off screen", hiddenFor);
+            logIdleReloadEvent([NSString stringWithFormat:@"reloading in place after %.0f min hidden (process swap unavailable)", hiddenFor]);
+            [wv reload];
+        });
     }];
 }
 
@@ -1566,6 +1666,7 @@ func runApp() {
 			// failure is answered by the snapshot, not by loading the other
 			// account's session. The dock can still switch.
 			cacheDebugLog("account profile unavailable (%v); falling back to the default profile", err)
+			noteSessionEvent("account registry unreadable (%v); started on the default profile", err)
 			profileID = ""
 		}
 		if profileID == "" {
@@ -1574,6 +1675,7 @@ func runApp() {
 			cacheDebugLog("unable to select account profile (%v); using the default profile", err)
 			_ = os.Unsetenv("WA_DESK_PROFILE_UUID")
 		}
+		applyProxySettingDarwin()
 		cacheDebugLog("startup: pid=%d profile=%s account=%s", os.Getpid(), userDataDir, profileID)
 		auditAccountWebKitStore(profileID)
 
@@ -1609,6 +1711,7 @@ func runApp() {
 		// 2. Set native WebKit customUserAgent to Google Chrome & auto-grant media capture
 		cua := C.CString(activeMacUserAgent)
 		C.setWKWebViewUserAgentAndMedia(w.Window(), cua)
+		reportProxyApplyDarwin()
 		C.free(unsafe.Pointer(cua))
 
 		// 3. Setup standard macOS menu bar and system status item (taskbar tray icon)
@@ -1633,7 +1736,7 @@ func runApp() {
 
 		// 6. Bind native notification bridge
 		_ = w.Bind("sendNativeNotification", func(title, body string) {
-			go showNativeNotification(title, body)
+			go func() { showNativeNotification(labelNotificationTitle(title), body) }()
 		})
 		_ = w.Bind("getNotificationsEnabledNative", getNotificationsEnabled)
 		_ = w.Bind("setNotificationsEnabledNative", setNotificationsEnabled)
@@ -1661,10 +1764,11 @@ func runApp() {
 		// Page-side diagnostics (drag & drop, document preview, switch steps).
 		// No-op unless diagnostics are enabled, so it costs one stat call.
 		_ = w.Bind("waDiagNative", diagLogFromPage)
+		_ = w.Bind("reportSessionStateNative", recordSessionState)
 
 		// 7. Bind external link handler to open links in macOS default browser
 		_ = w.Bind("openExternalLink", func(rawURL string) {
-			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+			if isSafeExternalURL(rawURL) {
 				_ = exec.Command("open", rawURL).Start()
 			}
 		})
@@ -1870,30 +1974,53 @@ func runApp() {
 			}
 			return map[string]any{"id": account.ID, "label": account.Label}
 		})
+		_ = w.Bind("getProxyNative", func() map[string]any {
+			return map[string]any{
+				"proxy":     getProxySetting(),
+				"supported": C.whatsappDeskProxySupported() != 0,
+				// The running view has no proxy although one is saved.
+				"failed": C.whatsappDeskProxyApplyState() < 0,
+			}
+		})
+		_ = w.Bind("setProxyNative", setProxySetting)
+		_ = w.Bind("removeAccountNative", func(id string) map[string]any {
+			account, err := removeAccount(id)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return map[string]any{"id": account.ID, "label": account.Label}
+		})
 		_ = w.Bind("requestAccountSwitchNative", func(id, lastUnread string) bool {
-			if switchRequested || isActiveAccount(id) {
+			if switchRequested {
 				return false
 			}
 			if !lastSwapAt.IsZero() && time.Since(lastSwapAt) < swapSettleDelay {
 				cacheDebugLog("account switch ignored: previous swap still settling")
 				return false
 			}
-			// Snapshot the outgoing account's unread badge before flipping the
-			// registry, so the dock can hint "unread when last seen" on the chip.
-			_ = setLastUnreadForActiveAccount(lastUnread)
-			if setActiveAccount(id) != nil {
-				cacheDebugLog("account switch failed: could not set the active account")
-				return false
-			}
-			cacheDebugLog("account switch requested: %s", id)
 			// Serialized: a second request arriving while a swap is in flight is
-			// dropped rather than racing the one already queued.
+			// dropped rather than racing the one already queued. The slot is
+			// taken BEFORE the registry is touched: flipping the registry first
+			// and then dropping the request left accounts.json naming the new
+			// account while the old account's page stayed on screen, so the
+			// next launch opened the "wrong" account.
 			select {
 			case switchMu <- struct{}{}:
 			default:
 				cacheDebugLog("account switch dropped: another swap is in flight")
 				return false
 			}
+			// One locked registry update: snapshot the outgoing account's
+			// unread badge and flip the active account together.
+			changed, err := switchActiveAccount(id, lastUnread)
+			if err != nil || !changed {
+				<-switchMu
+				if err != nil {
+					cacheDebugLog("account switch failed: %v", err)
+				}
+				return false
+			}
+			cacheDebugLog("account switch requested: %s", id)
 			lastSwapAt = time.Now()
 			// Deferred to the next main-thread turn instead of running inline: this
 			// callback is still executing inside the very WebView that is about to
@@ -1951,7 +2078,34 @@ func runApp() {
 			}
 		})
 
+		// The idle reload swaps the browser view through the same path as an
+		// account switch, and shares its lock and settle delay, so the two can
+		// never interleave or leave two parked engines alive.
+		setIdleRecycle(func() bool {
+			if switchRequested {
+				return false
+			}
+			if !lastSwapAt.IsZero() && time.Since(lastSwapAt) < swapSettleDelay {
+				return false
+			}
+			select {
+			case switchMu <- struct{}{}:
+			default:
+				return false
+			}
+			defer func() { <-switchMu }()
+			if !swapBrowserToActiveAccount(w) {
+				return false
+			}
+			lastSwapAt = time.Now()
+			cacheDebugLog("idle reload: page moved to a fresh process")
+			debugLogProcessStats("after-idle-recycle")
+			return true
+		})
+
 		w.Run()
+		// Before w is destroyed, so the native idle timer cannot reach it.
+		setIdleRecycle(nil)
 		close(stopUpdateTicker)
 		// A run loop that ends without a switch request means the app is about
 		// to exit. Log it with the reason, so "it just closed by itself" can be
@@ -2003,11 +2157,11 @@ func auditAccountWebKitStore(profileID string) {
 	if profileID == "" {
 		return
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	root := accountWebKitStoreRoot()
+	if root == "" {
 		return
 	}
-	storeDir := filepath.Join(home, "Library", "WebKit", "com.whatsapp.desk", "WebsiteDataStore", profileID)
+	storeDir := filepath.Join(root, webKitStoreDirName(profileID))
 	if _, err := os.Stat(storeDir); err == nil || !os.IsNotExist(err) {
 		return
 	}
@@ -2024,6 +2178,8 @@ func auditAccountWebKitStore(profileID string) {
 		}
 		cacheDebugLog("account %q: WebKit persistent store %s is missing after the account existed for %s; if this account keeps returning to the QR page, the engine fell back to an ephemeral store and no session can survive a restart",
 			account.Label, storeDir, time.Since(account.CreatedAt).Round(time.Second))
+		noteSessionEvent("WebKit data store for this account is missing after %s; the engine is using a temporary store, so the session will not survive a restart",
+			time.Since(account.CreatedAt).Round(time.Second))
 		return
 	}
 }
@@ -2055,10 +2211,56 @@ func swapBrowserToActiveAccount(w webview.WebView) bool {
 	// Without the Chrome user agent WhatsApp Web refuses to serve the app shell.
 	cua := C.CString(activeMacUserAgent)
 	C.setWKWebViewUserAgentAndMedia(w.Window(), cua)
+	reportProxyApplyDarwin()
 	C.free(unsafe.Pointer(cua))
 	cacheDebugLog("account switch: profile=%s", os.Getenv("WA_DESK_PROFILE_UUID"))
 	// The fresh view starts blank; load WhatsApp Web into it. The carried-over
 	// init script and bindings are already installed, so no re-bind is needed.
 	w.Navigate(appURL)
 	return true
+}
+
+// applyProxySettingDarwin hands the saved proxy to the native layer; it takes
+// effect on the next WebView created (startup, or an account swap). A change
+// in Settings therefore applies after a restart, as on Windows.
+func applyProxySettingDarwin() {
+	scheme, host, port, ok := proxyParts(getProxySetting())
+	kind := C.int(0)
+	if ok {
+		switch scheme {
+		case "socks5":
+			kind = 1
+		case "http":
+			kind = 2
+		}
+	}
+	if kind == 0 {
+		C.whatsappDeskSetProxy(nil, nil, 0)
+		return
+	}
+	if C.whatsappDeskProxySupported() == 0 {
+		cacheDebugLog("proxy: %s is saved but needs macOS 14 or newer; connecting directly", scheme)
+		C.whatsappDeskSetProxy(nil, nil, 0)
+		return
+	}
+	chost := C.CString(host)
+	cport := C.CString(port)
+	defer C.free(unsafe.Pointer(chost))
+	defer C.free(unsafe.Pointer(cport))
+	C.whatsappDeskSetProxy(chost, cport, kind)
+	cacheDebugLog("proxy: configured %s://%s:%s", scheme, host, port)
+}
+
+// reportProxyApplyDarwin logs what actually happened when the proxy was
+// installed on the view just created. A saved proxy that could not be
+// installed leaves WhatsApp on a direct connection; that used to be invisible
+// because the only log line was written before the attempt.
+func reportProxyApplyDarwin() {
+	switch state := C.whatsappDeskProxyApplyState(); {
+	case state > 0:
+		cacheDebugLog("proxy: applied to this view")
+	case state < 0:
+		cacheDebugLog("proxy: could NOT be applied to this view; WhatsApp is connecting DIRECTLY")
+		noteSessionEvent("the saved proxy could not be applied; WhatsApp is connecting directly")
+	}
 }
