@@ -128,3 +128,28 @@ func TestMacBuildPrefersAStableIdentityOverAdHoc(t *testing.T) {
 		t.Errorf("the identity helper script is missing: %v", err)
 	}
 }
+
+// The Windows on ARM updater downloads windowsArm64AssetName, so the release
+// pipeline must build and publish exactly that file; a name drift would send
+// every ARM64 install to the x64 fallback forever.
+func TestWindowsArm64BuildIsPublishedUnderTheUpdaterName(t *testing.T) {
+	build := readProjectFile(t, "build_windows.sh")
+	if !strings.Contains(build, `arm64) OUT="dist_win/`+windowsArm64AssetName+`"`) {
+		t.Errorf("build_windows.sh must write the arm64 build as dist_win/%s", windowsArm64AssetName)
+	}
+	release := readProjectFile(t, "release.sh")
+	for _, want := range []string{
+		`bash build_windows.sh "$VERSION" arm64`,
+		"cp dist_win/" + windowsArm64AssetName + " " + windowsArm64AssetName,
+		"  " + windowsArm64AssetName + "\n",
+	} {
+		if !strings.Contains(release, want) {
+			t.Errorf("release.sh is missing %q", want)
+		}
+	}
+	for _, syso := range []string{"rsrc_windows_amd64.syso", "rsrc_windows_arm64.syso"} {
+		if _, err := os.Stat(syso); err != nil {
+			t.Errorf("%s is missing; run make_windows_resources.sh", syso)
+		}
+	}
+}

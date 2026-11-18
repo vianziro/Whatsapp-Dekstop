@@ -3762,6 +3762,141 @@ func getInitScript(ua string) string {
 				});
 			}
 
+			// Message a number that is not saved as a contact (#89). WhatsApp Web
+			// opens such a chat itself from /send?phone=<digits>; this only asks
+			// for the number and normalizes it. Returns the digits to use, or an
+			// object with a user-facing error.
+			function normalizeChatPhoneNumber(raw) {
+				var value = String(raw || '').trim();
+				if (!value) return { error: 'Enter a phone number.' };
+				var international = false;
+				if (value.charAt(0) === '+') {
+					international = true;
+					value = value.slice(1);
+				}
+				// Spaces, dashes, dots, slashes and brackets are common in pasted
+				// numbers; anything else means it is not a phone number.
+				if (/[^0-9\s\-().\/]/.test(value)) return { error: 'Use digits only, e.g. +62 812 3456 7890.' };
+				var digits = value.replace(/[^0-9]/g, '');
+				if (!international && digits.indexOf('00') === 0) {
+					international = true;
+					digits = digits.slice(2);
+				}
+				if (digits.charAt(0) === '0') {
+					return { error: 'Start with the country code instead of 0, e.g. +62 812 3456 7890.' };
+				}
+				// E.164 allows at most 15 digits; anything under 8 cannot be a
+				// mobile number with its country code.
+				if (digits.length < 8 || digits.length > 15) return { error: 'That number is too ' + (digits.length < 8 ? 'short' : 'long') + '. Include the country code.' };
+				return { digits: digits };
+			}
+
+			function showChatByNumberModal() {
+				return new Promise(function(resolve) {
+					closeAccountModal();
+					var dark = isDarkMode();
+					var surface = dark ? '#233138' : '#ffffff';
+					var text = dark ? '#e9edef' : '#111b21';
+					var muted = dark ? '#8696a0' : '#667781';
+					var border = dark ? '#3b4a54' : '#d1d7db';
+					var inputBg = dark ? '#2a3942' : '#f0f2f5';
+
+					var overlay = document.createElement('div');
+					overlay.id = modalId;
+					overlay.style.cssText = 'position:fixed;inset:0;background:rgba(11,20,26,.55);z-index:2147483001;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+
+					var panel = document.createElement('form');
+					panel.setAttribute('role', 'dialog');
+					panel.setAttribute('aria-modal', 'true');
+					panel.setAttribute('aria-labelledby', modalId + '-title');
+					panel.style.cssText = 'width:340px;max-width:100%;background:' + surface + ';color:' + text + ';border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.35);padding:20px;box-sizing:border-box;';
+
+					var title = document.createElement('h2');
+					title.id = modalId + '-title';
+					title.textContent = 'Message a phone number';
+					title.style.cssText = 'margin:0 0 12px;font-size:16px;font-weight:600;letter-spacing:-.1px;';
+					panel.appendChild(title);
+
+					var input = document.createElement('input');
+					input.type = 'tel';
+					input.autocomplete = 'off';
+					input.spellcheck = false;
+					input.maxLength = 32;
+					input.placeholder = '+62 812 3456 7890';
+					input.setAttribute('aria-describedby', modalId + '-hint');
+					input.style.cssText = 'width:100%;box-sizing:border-box;background:' + inputBg + ';color:' + text + ';border:1px solid ' + border + ';border-radius:8px;padding:9px 11px;font-size:14px;outline:none;';
+					panel.appendChild(input);
+
+					var hint = document.createElement('p');
+					hint.id = modalId + '-hint';
+					hint.setAttribute('aria-live', 'polite');
+					var defaultHint = 'Include the country code. The number does not need to be in your contacts.';
+					hint.textContent = defaultHint;
+					hint.style.cssText = 'margin:8px 0 0;font-size:11px;line-height:1.5;color:' + muted + ';';
+					panel.appendChild(hint);
+
+					var actions = document.createElement('div');
+					actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:18px;';
+					var cancel = document.createElement('button');
+					cancel.type = 'button';
+					cancel.textContent = 'Cancel';
+					cancel.style.cssText = 'background:transparent;border:0;color:' + muted + ';font-size:13px;padding:8px 12px;cursor:pointer;border-radius:6px;';
+					var confirmBtn = document.createElement('button');
+					confirmBtn.type = 'submit';
+					confirmBtn.textContent = 'Open chat';
+					confirmBtn.style.cssText = 'background:#00a884;border:0;color:#f7f9fa;font-size:13px;font-weight:600;padding:8px 14px;cursor:pointer;border-radius:6px;';
+					actions.appendChild(cancel);
+					actions.appendChild(confirmBtn);
+					panel.appendChild(actions);
+
+					function finish(value) {
+						closeAccountModal();
+						resolve(value);
+					}
+					function showError(message) {
+						hint.textContent = message;
+						hint.style.color = '#f15c6d';
+						input.style.borderColor = '#f15c6d';
+						input.focus();
+					}
+					input.addEventListener('input', function() {
+						hint.textContent = defaultHint;
+						hint.style.color = muted;
+						input.style.borderColor = border;
+					});
+					panel.addEventListener('submit', function(e) {
+						e.preventDefault();
+						var result = normalizeChatPhoneNumber(input.value);
+						if (result.error) { showError(result.error); return; }
+						finish(result.digits);
+					});
+					cancel.onclick = function() { finish(null); };
+					overlay.addEventListener('keydown', function(e) {
+						if (e.key === 'Escape') { e.stopPropagation(); finish(null); }
+					});
+					overlay.addEventListener('mousedown', function(e) {
+						if (e.target === overlay) finish(null);
+					});
+
+					overlay.appendChild(panel);
+					document.body.appendChild(overlay);
+					requestAnimationFrame(function() { input.focus(); });
+				});
+			}
+
+			// WhatsApp Web loads the chat (or its own "not on WhatsApp" notice)
+			// from /send. It is a full page load, so it is refused while an
+			// account switch is under way.
+			function openChatByNumber() {
+				if (switchingId !== null) return;
+				showChatByNumberModal().then(function(digits) {
+					if (!digits) return;
+					if (window.showFloatingToast) window.showFloatingToast('Opening chat with +' + digits + '…');
+					window.location.href = 'https://web.whatsapp.com/send?phone=' + encodeURIComponent(digits);
+				});
+			}
+			window.openChatByNumber = openChatByNumber;
+
 			function createAccount() {
 				if (switchingId !== null) return;
 				if (!hasBridge('createAccountNative')) {
@@ -3796,6 +3931,10 @@ func getInitScript(ua string) string {
 			// the shortcuts use, so the icons stay truthful even when a feature was
 			// flipped via keyboard (Cmd+Shift+P / T) instead of a click.
 			function toolSvg(name) {
+				if (name === 'chatnumber') {
+					// Speech bubble with a dial pad: "message a number".
+					return '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1-5.6A8.4 8.4 0 1 1 21 11.5z"/><path d="M9 9h.01M12 9h.01M15 9h.01M9 12h.01M12 12h.01M15 12h.01M12 15h.01"/></svg>';
+				}
 				if (name === 'privacy') {
 					return '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>';
 				}
@@ -3807,6 +3946,15 @@ func getInitScript(ua string) string {
 
 			function toolDefs() {
 				var defs = [];
+				if (typeof window.openChatByNumber === 'function') {
+					defs.push({
+						id: 'chatnumber',
+						name: 'Message a phone number',
+						hint: '⌘/Ctrl+Shift+O',
+						click: function() { window.openChatByNumber(); },
+						isActive: function() { return false; }
+					});
+				}
 				if (typeof window.togglePrivacyMode === 'function' && typeof window.isPrivacyModeActive === 'function') {
 					defs.push({
 						id: 'privacy',
@@ -3987,6 +4135,13 @@ func getInitScript(ua string) string {
 				}
 				loadAccounts();
 			}
+
+			// Cmd/Ctrl+Shift+O: message a phone number that is not a contact.
+			window.addEventListener('keydown', function(e) {
+				if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || (e.key !== 'o' && e.key !== 'O')) return;
+				e.preventDefault();
+				openChatByNumber();
+			}, true);
 
 			window.addEventListener('keydown', function(e) {
 				if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || (e.key !== '1' && e.key !== '2')) return;
@@ -5701,6 +5856,7 @@ func getInitScript(ua string) string {
 					var modifier = isMac ? 'Cmd' : 'Ctrl';
 					shortcutsList.innerHTML =
 						'<div><strong class="wa-text-primary">' + modifier + '+,</strong> &mdash; Settings &amp; Controls</div>' +
+						'<div><strong class="wa-text-primary">' + modifier + '+Shift+O</strong> &mdash; Message a phone number</div>' +
 						'<div><strong class="wa-text-primary">' + modifier + '+Shift+D</strong> &mdash; Open downloads folder</div>' +
 						'<div><strong class="wa-text-primary">' + modifier + '+Shift+U</strong> &mdash; Check for updates</div>' +
 						'<div><strong class="wa-text-primary">' + modifier + '+Shift+P / T / M / S</strong> &mdash; Privacy / on top / mute / startup</div>' +

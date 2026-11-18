@@ -23,6 +23,14 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ### Added
 
+- **Message a phone number that is not in your contacts (#89).** The new dock button, ⌘/Ctrl+Shift+O
+  or *Controls → Message a Phone Number…* on macOS ask for the number and open the chat in
+  WhatsApp. Spaces, dashes and brackets are accepted; a number starting with 0 is refused with a
+  hint to use the country code, because WhatsApp needs the international form.
+- **Native Windows on ARM build (#89).** `WhatsAppDesk-arm64.exe` and
+  `WhatsApp-Desk-Windows-arm64.zip` run without x64 emulation. Windows on ARM installs update to
+  the ARM64 build when a release has one and keep using the x64 build otherwise; an x64 PC never
+  receives the ARM64 build. The Setup wizard remains x64.
 - **Remove a saved account.** Right-click an account chip in the dock for *Switch*, *Rename…*
   and *Remove account…*. The design called for removal from the start, but there was no way to
   undo an "Add account". Removal is offered only for the second account while it is inactive
@@ -80,6 +88,10 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ### Fixed
 
+- **Windows: the .exe carried the original upstream project's icon.** The embedded resource was a
+  copy from that project, so Explorer, the taskbar and the title bar showed its icon rather than
+  WhatsApp Desk's. `make_windows_resources.sh` now builds the resources for x64 and ARM64 from
+  `icon.ico` and `app.manifest`.
 - **Clicking the active account's chip dimmed the whole window until a reload.** The switch veil
   went up, the native side correctly refused the no-op switch, and nothing took the veil down.
   The active chip is no longer a switch target, and any declined switch now removes the veil.

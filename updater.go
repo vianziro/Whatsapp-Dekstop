@@ -33,6 +33,9 @@ var appVersion = "1.6.7"
 
 const githubRepo = "vianziro/Whatsapp-Dekstop"
 
+// windowsArm64AssetName is the native Windows on ARM build in a release.
+const windowsArm64AssetName = "WhatsAppDesk-arm64.exe"
+
 type GitHubAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -136,13 +139,24 @@ func findAssetForPlatform(release *GitHubRelease, goos, goarch string) *GitHubAs
 			}
 		}
 	} else if goos == "windows" {
-		for _, a := range release.Assets {
-			if strings.EqualFold(a.Name, "WhatsAppDesk.exe") {
-				return &a
+		// Windows on ARM gets its native build when the release has one. The
+		// x64 build stays its fallback (Windows 11 on ARM runs x64 programs
+		// under emulation), so releases from before the ARM64 build keep
+		// updating it. An x64 machine must never receive the ARM64 build.
+		preferred := []string{"WhatsAppDesk.exe"}
+		if goarch == "arm64" {
+			preferred = []string{windowsArm64AssetName, "WhatsAppDesk.exe"}
+		}
+		for _, name := range preferred {
+			for i := range release.Assets {
+				if strings.EqualFold(release.Assets[i].Name, name) {
+					return &release.Assets[i]
+				}
 			}
 		}
 		for _, a := range release.Assets {
-			if strings.HasSuffix(strings.ToLower(a.Name), ".exe") {
+			name := strings.ToLower(a.Name)
+			if strings.HasSuffix(name, ".exe") && !strings.Contains(name, "setup") && !strings.Contains(name, "arm64") {
 				return &a
 			}
 		}
@@ -332,6 +346,11 @@ func updateAssetForPlatform(goos, goarch string) string {
 	case "darwin":
 		return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsApp-Desk-macOS-Universal.zip"
 	case "windows":
+		// When a release has no ARM64 build, this URL is missing and the API
+		// listing falls back to the x64 build (see findAssetForPlatform).
+		if goarch == "arm64" {
+			return "https://github.com/" + githubRepo + "/releases/latest/download/" + windowsArm64AssetName
+		}
 		return "https://github.com/" + githubRepo + "/releases/latest/download/WhatsAppDesk.exe"
 	case "linux":
 		if goarch == "arm64" || goarch == "aarch64" {

@@ -1060,6 +1060,7 @@ static void setNativeWindowTheme(void* nsWindowPtr, const char* themeStr) {
 
 @interface MenuBridge : NSObject
 - (void)menuSettings:(id)sender;
+- (void)menuMessageNumber:(id)sender;
 - (void)menuCheckUpdates:(id)sender;
 - (void)menuOpenDownloads:(id)sender;
 - (void)menuTogglePrivacy:(id)sender;
@@ -1074,6 +1075,12 @@ static void setNativeWindowTheme(void* nsWindowPtr, const char* themeStr) {
 @end
 
 @implementation MenuBridge
+- (void)menuMessageNumber:(id)sender {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        showAppWindow();
+        evaluateAppJavaScript(@"if (window.openChatByNumber) { window.openChatByNumber(); }");
+    });
+}
 - (void)menuSettings:(id)sender {
     evaluateAppJavaScript(@"if (window.showSettingsModal) { window.showSettingsModal(); }");
 }
@@ -1327,6 +1334,9 @@ static void setupMacOSMenuBar(void) {
         [hardRelItem setTarget:g_menuBridge];
 
         [controlsMenu addItem:[NSMenuItem separatorItem]];
+
+        NSMenuItem* msgNumItem = [controlsMenu addItemWithTitle:@"Message a Phone Number\u2026" action:@selector(menuMessageNumber:) keyEquivalent:@""];
+        [msgNumItem setTarget:g_menuBridge];
 
         NSMenuItem* menuOpenFolder = [controlsMenu addItemWithTitle:@"Open Downloads Folder" action:@selector(menuOpenDownloads:) keyEquivalent:@""];
         [menuOpenFolder setTarget:g_menuBridge];
