@@ -109,13 +109,22 @@ echo "release notes taken from CHANGELOG.md"
 step "Building macOS (universal)"
 bash build_mac.sh "$VERSION" 2>&1 | grep -vE "deprecated|NSUserNotification|note:" | tail -3
 
+step "Building Windows on ARM (portable)"
+bash build_windows.sh "$VERSION" arm64 2>&1 | tail -3
+
 step "Building Windows (portable + Setup wizard)"
 bash build_windows_installer.sh "$VERSION" 2>&1 | tail -3
 
+step "Building Windows on ARM (portable)"
+bash build_windows.sh "$VERSION" arm64 2>&1 | tail -3
+
 step "Staging release assets"
+rm -f WhatsApp-Desk-Windows-arm64.zip WhatsAppDesk-arm64.exe
 rm -f WhatsApp-Desk-Windows-x64.zip WhatsAppDesk.exe WhatsApp.exe \
       WhatsApp-macOS-Universal.dmg WhatsApp-macOS-Universal.zip
 zip -j -q WhatsApp-Desk-Windows-x64.zip dist_win/WhatsAppDesk.exe
+zip -j -q WhatsApp-Desk-Windows-arm64.zip dist_win/WhatsAppDesk-arm64.exe
+cp dist_win/WhatsAppDesk-arm64.exe WhatsAppDesk-arm64.exe
 cp dist_win/WhatsAppDesk.exe WhatsAppDesk.exe
 cp dist_win/WhatsAppDesk.exe WhatsApp.exe
 cp WhatsApp-Desk-macOS-Universal.dmg WhatsApp-macOS-Universal.dmg
@@ -126,6 +135,8 @@ ASSETS=(
   WhatsApp-Desk-Windows-x64.zip
   WhatsAppDesk.exe
   WhatsApp.exe
+  WhatsApp-Desk-Windows-arm64.zip
+  WhatsAppDesk-arm64.exe
   WhatsApp-Desk-macOS-Universal.dmg
   WhatsApp-Desk-macOS-Universal.zip
   WhatsApp-macOS-Universal.dmg

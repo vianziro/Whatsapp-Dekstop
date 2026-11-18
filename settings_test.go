@@ -514,3 +514,165 @@ func TestChunkedDownloadRejectsInvalidChunkAndCanAbort(t *testing.T) {
 		t.Fatalf("abort left staged file behind: %v", err)
 	}
 }
+
+// --- #87: bridge hardening ----------------------------------------------------
+
+func TestIsSafeExternalURL(t *testing.T) {
+	ok := []string{
+		"https://example.com",
+		"http://example.com/path?q=1#x",
+		"https://wa.me/123",
+	}
+	bad := []string{
+		"", "file:///etc/passwd", "javascript:alert(1)", "ms-settings:privacy",
+		"smb://host/share", "https://", "https:///nohost", "https://user:pw@example.com",
+		"https://example.com/ a", "https://example.com/\n", "https://example.com/\x00",
+		"mailto:someone@example.com", "//example.com", "http:example.com",
+	}
+	for _, u := range ok {
+		if !isSafeExternalURL(u) {
+			t.Errorf("%q must be allowed", u)
+		}
+	}
+	for _, u := range bad {
+		if isSafeExternalURL(u) {
+			t.Errorf("%q must be refused", u)
+		}
+	}
+}
+
+func TestIsExecutableAttachment(t *testing.T) {
+	exec := []string{
+		"invoice.pdf.exe", "Setup.MSI", "run.command", "Tool.app", "Tool.app/",
+		"script.ps1", "evil.exe.", "evil.exe  ", "shortcut.lnk", "x.sh", "a.JAR", "y.desktop",
+	}
+	safe := []string{"photo.jpg", "doc.pdf", "sheet.xlsx", "notes.txt", "archive.zip", "song.mp3", "exe", "readme"}
+	for _, p := range exec {
+		if !isExecutableAttachment(p) {
+			t.Errorf("%q must be treated as executable", p)
+		}
+	}
+	for _, p := range safe {
+		if isExecutableAttachment(p) {
+			t.Errorf("%q must not be treated as executable", p)
+		}
+	}
+}
+
+func TestOpenBridgesUseTheGuards(t *testing.T) {
+	for _, file := range []string{"app_darwin.go", "app_windows.go", "app_linux.go"} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(data)
+		if !strings.Contains(src, "if isSafeExternalURL(rawURL) {") {
+			t.Errorf("%s: openExternalLink does not validate URLs with isSafeExternalURL", file)
+		}
+		if strings.Contains(src, `strings.HasPrefix(rawURL, "http://")`) {
+			t.Errorf("%s: openExternalLink still relies on a prefix check", file)
+		}
+	}
+	data, err := os.ReadFile("settings.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	i := strings.Index(body, "func openFileInDefaultApp(")
+	j := strings.Index(body[i:], "isExecutableAttachment(filePath)")
+	k := strings.Index(body[i:], "cmd = exec.Command(\"open\", filePath)")
+	if i < 0 || j < 0 || k < 0 || j > k {
+		t.Error("openFileInDefaultApp must refuse executable attachments before launching anything")
+	}
+}
+
+// The page's "this file is a program" notice and the native refusal must agree
+// on what counts as executable, or the user sees either a silent no-op or a
+// wrong explanation.
+func TestExecutableExtensionListsAgree(t *testing.T) {
+	script := getInitScript("test-agent")
+	start := strings.Index(script, `/\.(exe|`)
+	if start < 0 {
+		t.Fatal("open-file notice regex is missing from the page script")
+	}
+	end := strings.Index(script[start:], ")[")
+	if end < 0 {
+		t.Fatal("open-file notice regex is malformed")
+	}
+	jsExts := map[string]bool{}
+	for _, ext := range strings.Split(script[start+len(`/\.(`):start+end], "|") {
+		jsExts["."+ext] = true
+	}
+	for ext := range executableAttachmentExts {
+		if !jsExts[ext] {
+			t.Errorf("page notice regex is missing %q", ext)
+		}
+	}
+	for ext := range jsExts {
+		if !executableAttachmentExts[ext] {
+			t.Errorf("page notice regex has %q, which the native side does not refuse", ext)
+		}
+	}
+}
+
+// --- #84: proxy ---------------------------------------------------------------
+
+func TestNormalizeProxyURL(t *testing.T) {
+	ok := map[string]string{
+		"":                         "",
+		"  ":                       "",
+		"127.0.0.1:1080":           "socks5://127.0.0.1:1080",
+		"socks5://proxy.lan:1080":  "socks5://proxy.lan:1080",
+		"SOCKS5://Proxy.lan:1080/": "socks5://Proxy.lan:1080",
+		"http://10.0.0.2:3128":     "http://10.0.0.2:3128",
+		"socks5://[::1]:9050":      "socks5://[::1]:9050",
+	}
+	for in, want := range ok {
+		got, err := normalizeProxyURL(in)
+		if err != nil || got != want {
+			t.Errorf("normalizeProxyURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	bad := []string{
+		"socks5://host", "socks5://host:0", "socks5://host:70000", "ftp://h:1",
+		"https://h:443", "socks5://user:pw@h:1080", "socks5://h:1080/x", "socks5://h:1080?a=1",
+		"socks5://h h:1080", "socks5://h;rm:1080", "socks5://h\":1080", "http://h:80 --flag",
+	}
+	for _, in := range bad {
+		if got, err := normalizeProxyURL(in); err == nil {
+			t.Errorf("normalizeProxyURL(%q) must be refused, got %q", in, got)
+		}
+	}
+}
+
+func TestProxyBrowserArgsAreSingleTokens(t *testing.T) {
+	if args := proxyBrowserArgs(""); len(args) != 0 {
+		t.Fatalf("no proxy must add no switches, got %v", args)
+	}
+	if args := proxyBrowserArgs("not a proxy"); len(args) != 0 {
+		t.Fatalf("an invalid saved proxy must be ignored, got %v", args)
+	}
+	args := proxyBrowserArgs("socks5://127.0.0.1:1080")
+	if len(args) != 1 || args[0] != "--proxy-server=socks5://127.0.0.1:1080" {
+		t.Fatalf("unexpected proxy switches %v", args)
+	}
+	if strings.ContainsAny(args[0], " \t\"'") {
+		t.Fatal("a proxy switch must never contain characters that split or quote the WebView2 argument string")
+	}
+}
+
+func TestProxyIsWiredOnMacAndWindows(t *testing.T) {
+	win, _ := os.ReadFile("app_windows.go")
+	mac, _ := os.ReadFile("app_darwin.go")
+	if !strings.Contains(string(win), "proxyBrowserArgs(loadSettings().Proxy)") {
+		t.Error("Windows does not pass the saved proxy to WebView2")
+	}
+	for name, src := range map[string]string{"app_windows.go": string(win), "app_darwin.go": string(mac)} {
+		if !strings.Contains(src, `w.Bind("setProxyNative", setProxySetting)`) || !strings.Contains(src, `w.Bind("getProxyNative"`) {
+			t.Errorf("%s does not bind the proxy settings bridge", name)
+		}
+	}
+	if !strings.Contains(string(mac), "applyProxyToWebView(wv);") || !strings.Contains(string(mac), "applyProxySettingDarwin()") {
+		t.Error("macOS does not apply the saved proxy to the web view")
+	}
+}

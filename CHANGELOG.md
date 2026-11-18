@@ -17,6 +17,138 @@ Version numbers are declared in exactly one place — `appVersion` in `updater.g
 
 ---
 
+## [1.6.7] - 2026-11-04
+
+> Two-Account Reliability, Proxy Support, Stable macOS Signing and Security Hardening
+
+### Added
+
+- **Message a phone number that is not in your contacts (#89).** The new dock button, ⌘/Ctrl+Shift+O
+  or *Controls → Message a Phone Number…* on macOS ask for the number and open the chat in
+  WhatsApp. Spaces, dashes and brackets are accepted; a number starting with 0 is refused with a
+  hint to use the country code, because WhatsApp needs the international form.
+- **Native Windows on ARM build (#89).** `WhatsAppDesk-arm64.exe` and
+  `WhatsApp-Desk-Windows-arm64.zip` run without x64 emulation. Windows on ARM installs update to
+  the ARM64 build when a release has one and keep using the x64 build otherwise; an x64 PC never
+  receives the ARM64 build. The Setup wizard remains x64.
+- **Remove a saved account.** Right-click an account chip in the dock for *Switch*, *Rename…*
+  and *Remove account…*. The design called for removal from the start, but there was no way to
+  undo an "Add account". Removal is offered only for the second account while it is inactive
+  (the first account is the original profile; the active one's engine owns its data). The
+  profile is moved aside as `<profile>.removed-<timestamp>` rather than deleted, and a re-added
+  account always starts from a fresh, clean profile.
+- **Notifications name their account** once a second account exists (`Work · Alice`), so it is
+  clear which WhatsApp a message arrived on. Single-account installs are unchanged, and the
+  app's own update notice is never attributed to an account.
+- **A local record of lost sessions (`wa_session.log`).** Being thrown back to the QR code used
+  to leave no trace, because the diagnostic log is opt-in. The app now notes, beside
+  `wa_debug.log`, when an account's session appears or disappears (`SESSION-LOST`), how long it
+  had lasted, WhatsApp's own notice if one is shown, and each page load. The warnings that
+  explain a lost session (started on the fallback profile, a missing data store, a proxy that
+  could not be applied) are recorded there too; until now they reached only the opt-in
+  diagnostic log, so a normal install never recorded them. It is written only
+  when the state changes, holds no chat content, is capped at 256 KB and never leaves the
+  computer.
+- Inactive account chips say *Notifications paused until you switch to it*: only one account
+  runs at a time, and a silent account no longer reads as a broken one.
+
+- **Network proxy (#84).** Settings → *Network proxy* routes WhatsApp through a SOCKS5 or HTTP
+  proxy (`socks5://host:port`, `http://host:port`; a bare `host:port` means SOCKS5). Windows
+  passes it to WebView2 as `--proxy-server`; macOS 14+ sets it on each account's website data
+  store. Applied when the engine starts, so a change takes effect after a restart; the panel is
+  hidden on systems that cannot honour it (macOS 13 and older). Proxies with a username and
+  password are refused with an explanation rather than silently ignored.
+- **Stable macOS signing without a paid certificate.** `make_mac_signing_identity.sh` creates a
+  self-signed code-signing identity once; `build_mac.sh` then signs with it instead of ad hoc.
+  See *Security* below for why this matters.
+
+### Security
+
+- **macOS: the "WhatsApp Desk wants to use … WebCrypto Master Key" prompt after every build or
+  update, and the random "database error, relink your device" logouts that follow a Deny
+  (#74, #65).** WebKit encrypts the WhatsApp session with a key kept in that keychain item, and
+  macOS grants access by the app's code-signing requirement. An ad-hoc signature changes that
+  requirement on every build. Builds signed with the stable local identity keep it, so *Always
+  Allow* sticks. `build_mac.sh` now prints how to set this up whenever it falls back to ad hoc.
+- **Spreadsheet previews are parsed in an isolated Web Worker (#86).** SheetJS is updated from
+  0.18.5 to 0.20.3 (fixes CVE-2023-30533 prototype pollution and CVE-2024-22363 ReDoS; the file
+  is byte-identical to `cdn.sheetjs.com/xlsx-0.20.3`, SHA-256 `197255b0…bfd27`). Files from any
+  contact are now parsed in a worker that cannot reach the WhatsApp page or the native bridges,
+  is killed after 20 s, and never falls back to parsing in the page after a timeout. Previews
+  are capped at 5,000 rows per sheet with a note, so a huge sheet no longer stalls the window.
+- **Received programs are never launched through the bridge (#87).** `openFileNative` refuses
+  executables (`.exe`, `.msi`, `.bat`, `.ps1`, `.lnk`, `.app`, `.command`, `.pkg`, scripts, …,
+  including Windows' trailing-dot trick) and reveals them in Finder/Explorer instead, with a
+  notice in the preview.
+- **`openExternalLink` accepts only absolute `http(s)` URLs with a host (#87)** — no other
+  schemes, credentials, whitespace or control characters reach `open` / `rundll32`.
+- **Updates now require a `SHA256SUMS` list (#65).** Every release since checksums were
+  introduced publishes one, so a missing list now means an incomplete or tampered release and
+  the update is refused (a mismatch was already fatal).
+
+### Fixed
+
+- **Windows: the .exe carried the original upstream project's icon.** The embedded resource was a
+  copy from that project, so Explorer, the taskbar and the title bar showed its icon rather than
+  WhatsApp Desk's. `make_windows_resources.sh` now builds the resources for x64 and ARM64 from
+  `icon.ico` and `app.manifest`.
+- **Clicking the active account's chip dimmed the whole window until a reload.** The switch veil
+  went up, the native side correctly refused the no-op switch, and nothing took the veil down.
+  The active chip is no longer a switch target, and any declined switch now removes the veil.
+- **"Add account" / "Rename" refusals were silent.** Native bridges report refusals as
+  `{ error }`, which the dock treated as success. The user now sees the actual reason.
+- **A lost or corrupt `accounts.json` during a switch, rename or add could drop the second
+  account.** Mutations used the raw registry reader, which answered a missing file by minting
+  a new default registry and saving it, overwriting the snapshot that could have recovered it.
+  Every mutation now goes through the same retry + snapshot recovery as startup.
+- **macOS & Linux: a dropped switch request could leave the registry on the wrong account.**
+  The registry was flipped before the swap slot was claimed; when the request was then
+  dropped, `accounts.json` named an account that was not on screen and the next launch opened
+  it. The slot is now claimed first.
+- **Windows: the runtime cache trim targeted the first account's profile** even while the
+  second account was active, so the live account's WebView2 cache was never capped at
+  runtime. It now trims the active account's profile.
+- **macOS: accounts created by older versions were looked up in the wrong WebKit folder.** Their
+  ids are stored without dashes, while WebKit names the data store after the dashed UUID. The
+  startup audit therefore reported a healthy store as missing, and removing such an account
+  would have left its logged-in session in place instead of setting it aside. Both now resolve
+  the folder the way the engine does.
+- **macOS: a saved proxy that cannot be applied is no longer silent.** The log said the proxy
+  was in use before it was installed, and any failure was swallowed, leaving WhatsApp on a
+  direct connection with no sign of it. The log now records the real outcome and Settings →
+  *Network proxy* shows a warning. The connection is still made directly in that case.
+- **macOS: the idle memory reload did not give memory back.** It reloaded WhatsApp inside the
+  same page process, and WebKit keeps the memory that process has already used, so a long
+  session reached 3.5 GB (most of it in swap) despite several reloads. The idle reload now
+  moves the page to a fresh process, the same way an account switch does, and the old process
+  exits with its memory. If that is not possible at the moment it falls back to the old reload,
+  and `wa_idle_reload.log` says which one ran.
+- **Every spreadsheet preview left its parser running.** The isolated worker introduced above
+  was created per preview and never stopped, so each opened spreadsheet kept SheetJS and the
+  parsed workbook in memory until the app was restarted. Closing the preview now ends it.
+- **The account menu stopped responding after its first use.** A menu closed by choosing an
+  item left its outside-click handler attached, which then closed the next menu as soon as one
+  of its items was pressed. The handlers are now removed whenever the menu closes.
+
+### Changed
+
+- Account switching is one locked read-modify-write (`switchActiveAccount`) instead of three
+  separate registry round-trips, and engine start resolves the profile from a single registry
+  read. The snapshot-seeding check runs once per process instead of on every registry read.
+- Account profiles are resolved beside `accounts.json`, so tests no longer create directories
+  in the real user profile.
+- `go.mod` marks the four directly imported modules as direct requirements again (they were all
+  tagged `// indirect`).
+
+### Tests
+
+- Go: lost/corrupt registry during mutations, atomic switch, removal rules and recoverable
+  profile retirement (including legacy undashed ids), path-traversal guard, notification
+  labelling.
+- Source pins: every platform binds `removeAccountNative` and switches through
+  `switchActiveAccount`; macOS/Linux claim the swap slot before touching the registry; the dock
+  handles native refusals.
+
 ## [1.6.6] - 2026-10-16
 
 > Wrong-Account Startup and QR-Page Fixes

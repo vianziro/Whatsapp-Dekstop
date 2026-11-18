@@ -81,10 +81,10 @@ func TestOnboardingTitleShipsTheRealVersion(t *testing.T) {
 // future self-update.
 func TestUpdaterAssetNamesExistInTheChecksumList(t *testing.T) {
 	names := map[string]bool{
-		"WhatsApp-Desk-macOS-Universal.zip":  false,
-		"WhatsApp-macOS-Universal.zip":       false,
-		"WhatsAppDesk.exe":                   false,
-		"WhatsApp-Desk-macOS-Universal.dmg":  false,
+		"WhatsApp-Desk-macOS-Universal.zip":   false,
+		"WhatsApp-macOS-Universal.zip":        false,
+		"WhatsAppDesk.exe":                    false,
+		"WhatsApp-Desk-macOS-Universal.dmg":   false,
 		"WhatsApp-Desk-Windows-x64-Setup.exe": false,
 	}
 	data, err := os.ReadFile("SHA256SUMS")
@@ -102,6 +102,54 @@ func TestUpdaterAssetNamesExistInTheChecksumList(t *testing.T) {
 	for name, seen := range names {
 		if !seen {
 			t.Errorf("%s is referenced by the updater or release scripts but absent from SHA256SUMS; self-update verification would break", name)
+		}
+	}
+}
+
+// TestMacBuildPrefersAStableIdentityOverAdHoc pins the fix for the keychain
+// prompt after every build (#74): when no Developer ID is configured,
+// build_mac.sh must sign with the stable local identity if it exists, and only
+// fall back to ad hoc otherwise.
+func TestMacBuildPrefersAStableIdentityOverAdHoc(t *testing.T) {
+	data, err := os.ReadFile("build_mac.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	local := strings.Index(src, `security find-certificate -c "${LOCAL_SIGN_NAME}"`)
+	adhoc := strings.Index(src, `-s - "${BUNDLE_DIR}"`)
+	if local < 0 {
+		t.Fatal("build_mac.sh no longer looks for the stable local signing identity")
+	}
+	if adhoc >= 0 && adhoc < local {
+		t.Error("build_mac.sh signs ad hoc before considering the stable local identity")
+	}
+	if _, err := os.Stat("make_mac_signing_identity.sh"); err != nil {
+		t.Errorf("the identity helper script is missing: %v", err)
+	}
+}
+
+// The Windows on ARM updater downloads windowsArm64AssetName, so the release
+// pipeline must build and publish exactly that file; a name drift would send
+// every ARM64 install to the x64 fallback forever.
+func TestWindowsArm64BuildIsPublishedUnderTheUpdaterName(t *testing.T) {
+	build := readProjectFile(t, "build_windows.sh")
+	if !strings.Contains(build, `arm64) OUT="dist_win/`+windowsArm64AssetName+`"`) {
+		t.Errorf("build_windows.sh must write the arm64 build as dist_win/%s", windowsArm64AssetName)
+	}
+	release := readProjectFile(t, "release.sh")
+	for _, want := range []string{
+		`bash build_windows.sh "$VERSION" arm64`,
+		"cp dist_win/" + windowsArm64AssetName + " " + windowsArm64AssetName,
+		"  " + windowsArm64AssetName + "\n",
+	} {
+		if !strings.Contains(release, want) {
+			t.Errorf("release.sh is missing %q", want)
+		}
+	}
+	for _, syso := range []string{"rsrc_windows_amd64.syso", "rsrc_windows_arm64.syso"} {
+		if _, err := os.Stat(syso); err != nil {
+			t.Errorf("%s is missing; run make_windows_resources.sh", syso)
 		}
 	}
 }

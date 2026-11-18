@@ -30,6 +30,33 @@ it does not guarantee that every antivirus heuristic will accept a new build.
 Submit any remaining Microsoft Defender detection through Microsoft's malware
 submission portal and include the release version and SHA-256 digest.
 
+## macOS stable local identity (no paid certificate)
+
+Ad-hoc signatures (`codesign -s -`) change the app's designated requirement on
+every build. macOS ties the keychain item WebKit keeps the WebCrypto master key
+in — the key that encrypts the WhatsApp session in IndexedDB — to that
+requirement, so every rebuild or update of an ad-hoc build asks for the login
+password again, and *Deny* makes WhatsApp report "A database error occurred …
+relink your device" (#74).
+
+Run once per build machine:
+
+```bash
+bash make_mac_signing_identity.sh
+```
+
+It creates a self-signed code-signing identity, "WhatsApp Desk Local Signing",
+in the login keychain. `build_mac.sh` uses it automatically when
+`WA_MAC_SIGN_IDENTITY` is not set (override the name with
+`WA_MAC_LOCAL_SIGN_NAME`, or force ad hoc with `WA_MAC_ADHOC=1`). The resulting
+requirement is certificate-based and identical across builds, so *Always Allow*
+only has to be clicked once. It is not a Developer ID: Gatekeeper still treats
+the app as from an unidentified developer and it cannot be notarized.
+
+If you publish builds signed with this identity, export it from Keychain Access
+(`.p12`) and keep it safe: a new identity means one more keychain prompt for
+every user.
+
 ## macOS Developer ID and notarization
 
 For a local release, install the Developer ID Application certificate in the

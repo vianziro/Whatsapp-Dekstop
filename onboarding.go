@@ -82,6 +82,7 @@ func getOnboardingScript() string {
 					['Blur conversation messages & media', mod + ' + Shift + P'],
 					['Keep window always on top', mod + ' + Shift + T'],
 					['Settings & Control Center', mod + ' + ,'],
+					['Message a phone number', mod + ' + Shift + O'],
 					['Open downloads folder', mod + ' + Shift + D'],
 					['Mute notification sound', mod + ' + Shift + M']
 				];

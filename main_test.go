@@ -1344,8 +1344,15 @@ func TestSpreadsheetPreviewSanitizesCellMarkup(t *testing.T) {
 	if !strings.Contains(script, "function sanitizeSheetHtml(html) {") {
 		t.Fatal("injected script is missing the sanitizeSheetHtml helper")
 	}
-	if !strings.Contains(script, "sanitizeSheetHtml(XLSX.utils.sheet_to_html(") {
+	// Sheet HTML now comes from the isolated worker or the in-page fallback,
+	// both through book.sheetHtml(); the single renderer entry must sanitize
+	// whatever either of them returns.
+	sanitizedEntry := "renderSpreadsheetSheet(book, sheetNames, activeName, sanitizeSheetHtml(rawHtml))"
+	if !strings.Contains(script, sanitizedEntry) {
 		t.Error("sheet_to_html output is not passed through sanitizeSheetHtml")
+	}
+	if n := strings.Count(script, "renderSpreadsheetSheet("); n != 2 { // definition + the one sanitized call
+		t.Errorf("renderSpreadsheetSheet must have exactly one (sanitized) caller, found %d occurrences", n)
 	}
 	if strings.Contains(script, "var tableHtml = XLSX.utils.sheet_to_html(") {
 		t.Error("raw sheet_to_html output is still assigned to tableHtml")

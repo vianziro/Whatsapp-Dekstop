@@ -68,6 +68,39 @@ func TestLinuxArm64UpdaterNeverFallsBackToX64(t *testing.T) {
 	}
 }
 
+func TestWindowsArm64UpdaterPrefersNativeBuildAndFallsBackToX64(t *testing.T) {
+	both := &GitHubRelease{Assets: []GitHubAsset{
+		{Name: "WhatsApp-Desk-Windows-x64-Setup.exe"},
+		{Name: "WhatsAppDesk-arm64.exe"},
+		{Name: "WhatsAppDesk.exe"},
+	}}
+	if asset := findAssetForPlatform(both, "windows", "arm64"); asset == nil || asset.Name != "WhatsAppDesk-arm64.exe" {
+		t.Fatalf("Windows arm64 must select the native build, got %#v", asset)
+	}
+	if asset := findAssetForPlatform(both, "windows", "amd64"); asset == nil || asset.Name != "WhatsAppDesk.exe" {
+		t.Fatalf("Windows x64 must keep the x64 build, got %#v", asset)
+	}
+
+	// Releases from before the ARM64 build: Windows 11 on ARM runs x64.
+	x64Only := &GitHubRelease{Assets: []GitHubAsset{{Name: "WhatsApp-Desk-Windows-x64-Setup.exe"}, {Name: "WhatsAppDesk.exe"}}}
+	if asset := findAssetForPlatform(x64Only, "windows", "arm64"); asset == nil || asset.Name != "WhatsAppDesk.exe" {
+		t.Fatalf("Windows arm64 must fall back to the x64 build, got %#v", asset)
+	}
+
+	// An x64 machine cannot run the ARM64 build or update with the installer.
+	armOnly := &GitHubRelease{Assets: []GitHubAsset{{Name: "WhatsApp-Desk-Windows-x64-Setup.exe"}, {Name: "WhatsAppDesk-arm64.exe"}}}
+	if asset := findAssetForPlatform(armOnly, "windows", "amd64"); asset != nil {
+		t.Fatalf("Windows x64 must never receive the ARM64 build or the installer, got %#v", asset)
+	}
+
+	if got := updateAssetForPlatform("windows", "arm64"); !strings.HasSuffix(got, "/WhatsAppDesk-arm64.exe") {
+		t.Fatalf("Windows arm64 stable asset URL = %q", got)
+	}
+	if got := updateAssetForPlatform("windows", "amd64"); !strings.HasSuffix(got, "/WhatsAppDesk.exe") {
+		t.Fatalf("Windows x64 stable asset URL = %q", got)
+	}
+}
+
 func TestFindLinuxAssetPrefersWebkit41WhenRequested(t *testing.T) {
 	release := &GitHubRelease{Assets: []GitHubAsset{
 		{Name: "WhatsApp-Desk-Linux-x64.tar.gz", BrowserDownloadURL: "https://example.test/x64.tar.gz"},

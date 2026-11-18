@@ -115,6 +115,7 @@ cat << EOF > "${CONTENTS_DIR}/Info.plist"
 </plist>
 EOF
 
+LOCAL_SIGN_NAME="${WA_MAC_LOCAL_SIGN_NAME:-WhatsApp Desk Local Signing}"
 echo "Code signing ${BUNDLE_DIR} (hardened runtime)..."
 xattr -cr "${BUNDLE_DIR}" 2>/dev/null || true
 if command -v codesign >/dev/null 2>&1; then
@@ -125,6 +126,24 @@ if command -v codesign >/dev/null 2>&1; then
         else
             codesign --force --deep --timestamp --options runtime --sign "${WA_MAC_SIGN_IDENTITY}" "${BUNDLE_DIR}"
         fi
+    elif [ "${WA_MAC_ADHOC:-0}" != "1" ] && security find-certificate -c "${LOCAL_SIGN_NAME}" >/dev/null 2>&1; then
+        # Stable self-signed identity (see make_mac_signing_identity.sh). macOS
+        # binds the keychain item WebKit keeps the WebCrypto master key in -
+        # the key that encrypts the WhatsApp session in IndexedDB - to the
+        # app's designated requirement. An ad-hoc signature changes that
+        # requirement on EVERY build, so every rebuild or update asked for the
+        # login password again ("WhatsApp Desk wants to use ... WebCrypto
+        # Master Key"), and answering Deny left WhatsApp unable to read its own
+        # session: "A database error occurred ... relink your device" (#74).
+        # A certificate-based requirement stays identical across builds, so
+        # "Always Allow" sticks.
+        if [ -f "WhatsAppDesk.entitlements" ]; then
+            codesign --force --deep --options runtime --entitlements WhatsAppDesk.entitlements \
+                --sign "${LOCAL_SIGN_NAME}" "${BUNDLE_DIR}"
+        else
+            codesign --force --deep --options runtime --sign "${LOCAL_SIGN_NAME}" "${BUNDLE_DIR}"
+        fi
+        echo "Signed with the stable local identity '${LOCAL_SIGN_NAME}' (keychain access survives rebuilds; not notarized)."
     else
         if [ -f "WhatsAppDesk.entitlements" ]; then
             codesign --force --deep --options runtime --entitlements WhatsAppDesk.entitlements -s - "${BUNDLE_DIR}"
@@ -132,6 +151,8 @@ if command -v codesign >/dev/null 2>&1; then
             codesign --force --deep --options runtime -s - "${BUNDLE_DIR}"
         fi
         echo "Notice: ad-hoc signature only; Gatekeeper notarization requires WA_MAC_SIGN_IDENTITY."
+        echo "Notice: every ad-hoc build asks for keychain access again (WebCrypto Master Key)."
+        echo "        Run 'bash make_mac_signing_identity.sh' once to sign with a stable local identity instead."
     fi
     codesign --verify --deep --strict --verbose=2 "${BUNDLE_DIR}"
     echo "Bundle signature verified."

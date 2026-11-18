@@ -25,15 +25,22 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 ARCH="${2:-amd64}"
-OUT="dist_win/WhatsAppDesk.exe"
+case "$ARCH" in
+  amd64) OUT="dist_win/WhatsAppDesk.exe"; MINGW_CC=x86_64-w64-mingw32-gcc ;;
+  # Windows on ARM. Native build of the same source; the updater picks it
+  # by this name (windowsArm64AssetName in updater.go).
+  arm64) OUT="dist_win/WhatsAppDesk-arm64.exe"; MINGW_CC=aarch64-w64-mingw32-gcc ;;
+  *) echo "ERROR: unsupported Windows arch: $ARCH (amd64 or arm64)" >&2; exit 2 ;;
+esac
+[ -f "rsrc_windows_${ARCH}.syso" ] || { echo "ERROR: rsrc_windows_${ARCH}.syso is missing; run make_windows_resources.sh" >&2; exit 1; }
 mkdir -p dist_win
 
 export GOOS=windows
 export GOARCH="$ARCH"
 
-if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+if command -v "$MINGW_CC" >/dev/null 2>&1; then
   export CGO_ENABLED=1
-  export CC=x86_64-w64-mingw32-gcc
+  export CC="$MINGW_CC"
 else
   export CGO_ENABLED=0
 fi

@@ -32,7 +32,11 @@ fi
 WA_DESK_VERSION="$VERSION" "$PYTHON_BIN" installer/windows/make_wizard_assets.py
 
 echo "== 3/3 compiling installer =="
-makensis -DVERSION="$VERSION" -DAPPEXE_PATH="../../dist_win/WhatsAppDesk.exe" \
+# The .nsi is UTF-8 (it has non-ASCII characters from line 1). makensis
+# converts it through the current locale, so under the POSIX "C" locale - what
+# a non-interactive shell or a fresh macOS install often has - it aborts with
+# "Bad text encoding". Pin both the locale and the input charset.
+LC_ALL=en_US.UTF-8 makensis -INPUTCHARSET UTF8 -DVERSION="$VERSION" -DAPPEXE_PATH="../../dist_win/WhatsAppDesk.exe" \
   installer/windows/WhatsAppDesk.nsi
 bash sign_windows_artifact.sh "WhatsApp-Desk-Windows-x64-Setup.exe"
 
